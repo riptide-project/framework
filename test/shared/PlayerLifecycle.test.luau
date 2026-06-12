@@ -66,5 +66,30 @@ return function()
 
 			check.equal(removed, player)
 		end)
+
+		test.case("should trigger custom OnPlayerAdded and OnPlayerRemoving callbacks passed in deps", function()
+			local players = MockPlayers.new()
+			local player = { UserId = 1 }
+			table.insert(players._players, player)
+
+			local addedTriggered = nil
+			local removedTriggered = nil
+
+			PlayerLifecycle:_init({
+				Players = players,
+				OnPlayerAdded = function(p)
+					addedTriggered = p
+				end,
+				OnPlayerRemoving = function(p)
+					removedTriggered = p
+				end,
+			})
+
+			PlayerLifecycle:Start({}, {})
+			check.equal(addedTriggered, player)
+
+			players:RemovePlayer(player)
+			check.equal(removedTriggered, player)
+		end)
 	end)
 end

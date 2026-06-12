@@ -1,11 +1,14 @@
 --!strict
 -- Riptide/shared/StateReplication.lua
 -- Minimal server-authoritative state replication (global + per-player)
-
-local task = task
-if not task then
-	task = require("@lune/task")
-end
+--
+-- DESIGN CONTRACT (v0.9.0):
+--   • Snapshot sync: fire-and-respond handshake over RemoteEvents.
+--     Client fires EVENT_SNAPSHOT (request) → server fires back snapshot payload.
+--     No InvokeServer / RemoteFunction required.
+--   • notify() is synchronous — subscriber callbacks must not yield.
+--   • Delta packets use flat RemoteEvent args (scope, key, value, version)
+--     to avoid one table allocation per Set() call.
 
 type Callback = (value: any) -> ()
 
@@ -14,7 +17,7 @@ type NetworkLike = {
 	Unregister: (funcName: string, callback: (...any) -> any) -> (),
 	FireAllClients: ((funcName: string, ...any) -> ())?,
 	FireClient: ((player: any, funcName: string, ...any) -> ())?,
-	InvokeServer: ((funcName: string, ...any) -> any)?,
+	FireServer: ((funcName: string, ...any) -> ())?,
 }
 
 export type StateReplicationDeps = {
@@ -50,68 +53,66 @@ local function ensureServer(self: any)
 	end
 end
 
+-- ZERO-ALLOCATION HOT PATH — synchronous, no task.spawn.
+-- Subscriber callbacks must not yield; use task.defer internally if needed.
 local function notify(self: any, key: string, value: any)
 	local subscribers = self._subscribers[key]
 	if not subscribers then
 		return
 	end
-
 	for _, callback in ipairs(subscribers) do
-		task.spawn(callback, value)
+		local ok, err = xpcall(callback, debug.traceback, value)
+		if not ok then
+			warn(string.format("[StateReplication] Subscriber callback error for key '%s': %s", key, tostring(err)))
+		end
 	end
 end
 
-local function getClientResolvedValue(self: any, key: string)
-	local playerState = self._clientPlayerState
-	if playerState[key] ~= nil then
-		return playerState[key]
+local function getClientResolvedValue(self: any, key: string): any
+	local pv = self._clientPlayerState[key]
+	if pv ~= nil then
+		return pv
 	end
 	return self._clientGlobalState[key]
 end
 
 local function snapshotResolvedState(self: any): { [string]: any }
 	local resolved = shallowCopy(self._clientGlobalState)
-	for key, value in pairs(self._clientPlayerState) do
-		resolved[key] = value
+	for k, v in pairs(self._clientPlayerState) do
+		resolved[k] = v
 	end
 	return resolved
 end
 
-local function applyClientDelta(self: any, payload: any)
-	if type(payload) ~= "table" then
-		return
+-- Flat args: (scope, key, value, version) — no payload table allocation.
+local function applyClientDelta(self: any, scope: string, key: string, value: any, version: number)
+	local versions: { [string]: number }
+	local values: { [string]: any }
+
+	if scope == "player" then
+		versions = self._clientPlayerVersions
+		values = self._clientPlayerState
+	else
+		versions = self._clientGlobalVersions
+		values = self._clientGlobalState
 	end
 
-	local key = payload.key
-	local version = payload.version
-	local scope = payload.scope
-	if type(key) ~= "string" or type(version) ~= "number" then
-		return
-	end
-	if scope ~= nil and scope ~= "global" and scope ~= "player" then
-		return
-	end
-	if scope == nil then
-		scope = "global"
-	end
-
-	local versions = if scope == "player" then self._clientPlayerVersions else self._clientGlobalVersions
-	local values = if scope == "player" then self._clientPlayerState else self._clientGlobalState
-
-	local oldResolvedValue = getClientResolvedValue(self, key)
-	local currentVersion = versions[key] or 0
+	local currentVersion: number = versions[key] or 0
 	if version <= currentVersion then
 		return
 	end
 
+	local oldResolved = getClientResolvedValue(self, key)
 	versions[key] = version
-	values[key] = payload.value
+	values[key] = value
+	local newResolved = getClientResolvedValue(self, key)
 
-	local newResolvedValue = getClientResolvedValue(self, key)
-	if oldResolvedValue ~= newResolvedValue then
-		notify(self, key, newResolvedValue)
+	if oldResolved ~= newResolved then
+		notify(self, key, newResolved)
 	end
 end
+
+-- ---------------------------------------------------------------------------
 
 local StateReplication = {} :: StateReplicationAPI
 
@@ -135,7 +136,8 @@ StateReplication._clientPlayerState = {} :: { [string]: any }
 StateReplication._clientPlayerVersions = {} :: { [string]: number }
 
 StateReplication._syncYielding = false
-StateReplication._syncBuffer = {} :: { any }
+-- Each entry: { scope, key, value, version } — buffered during initial sync.
+StateReplication._syncBuffer = {} :: { { any } }
 
 StateReplication._subscribers = {} :: { [string]: { Callback } }
 StateReplication._deltaHandler = nil :: ((...any) -> any)?
@@ -173,11 +175,9 @@ function StateReplication:_init(deps: StateReplicationDeps)
 	if not deps then
 		error("[StateReplication] _init requires a deps table.", 2)
 	end
-
 	if type(deps.IsServer) ~= "boolean" then
 		error("[StateReplication] _init requires deps.IsServer as boolean.", 2)
 	end
-
 	if not deps.Network then
 		error("[StateReplication] _init requires deps.Network.", 2)
 	end
@@ -191,23 +191,31 @@ function StateReplication:_init(deps: StateReplicationDeps)
 	self._initialized = true
 
 	if self._isServer then
-		self._snapshotHandler = function(player: any): any
+		-- SERVER: respond to client snapshot requests.
+		-- Protocol: client fires EVENT_SNAPSHOT (no args) → server fires back
+		--           one structured snapshot table to that specific client.
+		self._snapshotHandler = function(player: any)
+			local net = self._network
+			if not (net and net.FireClient) then
+				return
+			end
 			local playerState = self._playerState[player] or {}
-			local playerVersions = self._playerVersions[player] or {}
-			return {
+			local playerVersions = self._playerVersions[player] or {};
+			(net.FireClient :: any)(player, EVENT_SNAPSHOT, {
 				global = shallowCopy(self._globalState),
 				globalVersions = shallowCopy(self._globalVersions),
 				player = shallowCopy(playerState),
 				playerVersions = shallowCopy(playerVersions),
-			}
+			})
 		end
 		self._network.Register(EVENT_SNAPSHOT, self._snapshotHandler)
 	else
-		self._deltaHandler = function(payload: any)
+		-- CLIENT: receive flat-arg delta packets and buffer them during sync.
+		self._deltaHandler = function(scope: string, key: string, value: any, version: number)
 			if self._syncYielding then
-				table.insert(self._syncBuffer, payload)
+				table.insert(self._syncBuffer, { scope, key, value, version })
 			else
-				applyClientDelta(self, payload)
+				applyClientDelta(self, scope, key, value, version)
 			end
 		end
 		self._network.Register(EVENT_DELTA, self._deltaHandler)
@@ -225,13 +233,9 @@ function StateReplication:Set(key: string, value: any)
 	self._globalVersions[key] = nextVersion
 	self._globalState[key] = value
 
+	-- FLAT ARGS: no table allocation per call.
 	if self._network and self._network.FireAllClients then
-		self._network.FireAllClients(EVENT_DELTA, {
-			scope = "global",
-			key = key,
-			value = value,
-			version = nextVersion,
-		})
+		self._network.FireAllClients(EVENT_DELTA, "global", key, value, nextVersion)
 	end
 end
 
@@ -258,13 +262,9 @@ function StateReplication:SetForPlayer(player: any, key: string, value: any)
 	playerVersions[key] = nextVersion
 	playerState[key] = value
 
+	-- FLAT ARGS: no table allocation per call.
 	if self._network and self._network.FireClient then
-		self._network.FireClient(player, EVENT_DELTA, {
-			scope = "player",
-			key = key,
-			value = value,
-			version = nextVersion,
-		})
+		(self._network.FireClient :: any)(player, EVENT_DELTA, "player", key, value, nextVersion)
 	end
 end
 
@@ -328,71 +328,108 @@ function StateReplication:Subscribe(key: string, callback: Callback): () -> ()
 		if not list then
 			return
 		end
-
 		for index, current in ipairs(list) do
 			if current == callback then
 				table.remove(list, index)
 				break
 			end
 		end
-
 		if #list == 0 then
 			self._subscribers[key] = nil
 		end
 	end
 end
 
+--[[
+	RequestSync — async fire-and-respond handshake.
+
+	Fires EVENT_SNAPSHOT to the server (no args = "please send me a snapshot").
+	Registers a one-shot handler on EVENT_SNAPSHOT to receive the response.
+	Deltas arriving during the round-trip are buffered and replayed after the
+	snapshot is applied.
+
+	Returns true if the request was dispatched, false if Network is unavailable.
+]]
 function StateReplication:RequestSync(): boolean
 	if self._isServer then
 		return false
 	end
 
-	if not self._network or not self._network.InvokeServer then
+	local net = self._network
+	if not net then
+		return false
+	end
+
+	-- Guard: don't send a second request if one is already in flight.
+	if self._syncYielding then
 		return false
 	end
 
 	self._syncYielding = true
-	local ok, snapshot = pcall(self._network.InvokeServer, EVENT_SNAPSHOT)
-	self._syncYielding = false
 
-	if not ok or type(snapshot) ~= "table" then
-		return false
-	end
+	-- One-shot handler: fires once when the server replies with a snapshot.
+	local onSnapshot: (...any) -> ()
+	onSnapshot = function(snapshot: any)
+		-- Unregister ourselves immediately.
+		net.Unregister(EVENT_SNAPSHOT, onSnapshot)
+		self._snapshotHandler = nil
+		self._syncYielding = false
 
-	local previousResolvedState = snapshotResolvedState(self)
-	self._clientGlobalState = {}
-	self._clientGlobalVersions = {}
-	self._clientPlayerState = {}
-	self._clientPlayerVersions = {}
-
-	for key, value in pairs(snapshot.global or {}) do
-		self._clientGlobalState[key] = value
-		self._clientGlobalVersions[key] = ((snapshot.globalVersions or {})[key] or 0)
-	end
-
-	for key, value in pairs(snapshot.player or {}) do
-		self._clientPlayerState[key] = value
-		self._clientPlayerVersions[key] = ((snapshot.playerVersions or {})[key] or 0)
-	end
-
-	local currentResolvedState = snapshotResolvedState(self)
-
-	for key, value in pairs(currentResolvedState) do
-		if previousResolvedState[key] ~= value then
-			notify(self, key, value)
+		if type(snapshot) ~= "table" then
+			table.clear(self._syncBuffer)
+			return
 		end
-	end
 
-	for key in pairs(previousResolvedState) do
-		if currentResolvedState[key] == nil then
-			notify(self, key, nil)
+		local previousResolved = snapshotResolvedState(self)
+
+		-- Apply the snapshot wholesale.
+		table.clear(self._clientGlobalState)
+		table.clear(self._clientGlobalVersions)
+		table.clear(self._clientPlayerState)
+		table.clear(self._clientPlayerVersions)
+
+		for k, v in pairs(snapshot.global or {}) do
+			self._clientGlobalState[k] = v
 		end
+		for k, v in pairs(snapshot.globalVersions or {}) do
+			self._clientGlobalVersions[k] = v
+		end
+		for k, v in pairs(snapshot.player or {}) do
+			self._clientPlayerState[k] = v
+		end
+		for k, v in pairs(snapshot.playerVersions or {}) do
+			self._clientPlayerVersions[k] = v
+		end
+
+		local currentResolved = snapshotResolvedState(self)
+
+		-- Notify subscribers whose resolved value changed.
+		for k, v in pairs(currentResolved) do
+			if previousResolved[k] ~= v then
+				notify(self, k, v)
+			end
+		end
+		for k in pairs(previousResolved) do
+			if currentResolved[k] == nil then
+				notify(self, k, nil)
+			end
+		end
+
+		-- Drain buffered deltas that arrived during the round-trip.
+		for _, buffered in ipairs(self._syncBuffer) do
+			applyClientDelta(self, buffered[1] :: string, buffered[2] :: string, buffered[3], buffered[4] :: number)
+		end
+		table.clear(self._syncBuffer)
 	end
 
-	for _, bufferedPayload in ipairs(self._syncBuffer) do
-		applyClientDelta(self, bufferedPayload)
+	-- Store reference so resetState() can unregister it if needed.
+	self._snapshotHandler = onSnapshot
+	net.Register(EVENT_SNAPSHOT, onSnapshot)
+
+	-- Fire the request to the server.
+	if net.FireServer then
+		net.FireServer(EVENT_SNAPSHOT)
 	end
-	table.clear(self._syncBuffer)
 
 	return true
 end

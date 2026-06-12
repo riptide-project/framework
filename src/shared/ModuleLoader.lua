@@ -15,6 +15,8 @@ export type Config = {
 	ModulesFolder: ModuleFolders,
 	SharedModulesFolder: ModuleFolders?,
 	ComponentsFolder: Folder?,
+	PluginsFolder: (Folder | { Folder })?,
+	ExternalPlugins: { { [string]: any } }?,
 }
 
 function ModuleLoader.GetCanonicalModuleId(modulesFolder: Folder, moduleScript: ModuleScript): string
@@ -135,7 +137,7 @@ function ModuleLoader.Launch(sideName: string, riptideRef: any, config: Config)
 
 	local loadedModules = {} :: { { name: string, module: any } }
 
-	-- 1. LOAD PHASE
+	-- 1. LOAD PHASE — discover and require all module scripts
 	local seenModuleScripts = {} :: { [ModuleScript]: boolean }
 	for _, sharedFolder in ipairs(ModuleLoader.NormalizeFolders(config.SharedModulesFolder, "SharedModulesFolder")) do
 		ModuleLoader.LoadModules(sharedFolder, seenModuleScripts, riptideRef, loadedModules, sideName)
@@ -149,11 +151,23 @@ function ModuleLoader.Launch(sideName: string, riptideRef: any, config: Config)
 		riptideRef.ComponentService:_start(config.ComponentsFolder)
 	end
 
-	if sideName == "Server" and riptideRef.PlayerLifecycle and type(riptideRef.PlayerLifecycle.Start) == "function" then
-		riptideRef.PlayerLifecycle:Start(loadedModules, riptideRef)
+	-- 2. PLUGIN LOAD + INIT PHASE — runs BEFORE module Init so modules can call
+	--    GetPluginAPI() / GetPlugin() safely inside their own Init hooks.
+	--    Plugin Start is deferred until after Module Start (see step 4 below).
+	local pluginManager: any = nil
+	if config.PluginsFolder ~= nil or config.ExternalPlugins ~= nil then
+		pluginManager = riptideRef.Plugins
+		if pluginManager and type(pluginManager.LoadPlugins) == "function" then
+			pluginManager:LoadPlugins(config.PluginsFolder, config.ExternalPlugins)
+			pluginManager:InitPlugins()
+		else
+			warn("[Riptide] PluginsFolder/ExternalPlugins provided but Riptide.Plugins is not initialised. Call _init first.")
+			pluginManager = nil
+		end
 	end
 
-	-- 2. INIT PHASE
+	-- 3. MODULE INIT PHASE — synchronous, sequential.
+	--    Plugin PublicAPIs are now available.
 	for _, data in ipairs(loadedModules) do
 		if type(data.module.Init) == "function" then
 			local ok, err = xpcall(data.module.Init, debug.traceback, data.module, riptideRef)
@@ -163,7 +177,12 @@ function ModuleLoader.Launch(sideName: string, riptideRef: any, config: Config)
 		end
 	end
 
-	-- 3. START PHASE
+	-- 3.5. PLAYER LIFECYCLE START — runs AFTER module Init so self properties are populated.
+	if sideName == "Server" and riptideRef.PlayerLifecycle and type(riptideRef.PlayerLifecycle.Start) == "function" then
+		riptideRef.PlayerLifecycle:Start(loadedModules, riptideRef)
+	end
+
+	-- 4. MODULE START PHASE — async via task.spawn (non-blocking).
 	for _, data in ipairs(loadedModules) do
 		if type(data.module.Start) == "function" then
 			task.spawn(function()
@@ -176,6 +195,13 @@ function ModuleLoader.Launch(sideName: string, riptideRef: any, config: Config)
 	end
 
 	print("🌊 [Riptide] ✅ " .. sideName .. " Start Phase Dispatched.")
+
+	-- 5. PLUGIN START PHASE — async, after all modules have been initialized.
+	--    Plugins can now safely interact with fully-initialized game modules.
+	if pluginManager then
+		pluginManager:StartPlugins()
+		print("🌊 [Riptide] ✅ " .. sideName .. " Plugin Phase Dispatched.")
+	end
 end
 
 return ModuleLoader

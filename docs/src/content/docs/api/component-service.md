@@ -6,6 +6,10 @@ description: Manage instance lifecycle via CollectionService tags.
 
 The `ComponentService` binds Roblox `CollectionService` tags to Luau component classes. When a tagged instance appears, a component object is created; when the tag is removed or the instance is destroyed, the component is cleaned up.
 
+:::note[What is CollectionService?]
+CollectionService is a Roblox engine service that lets you **tag** any `Instance` with an arbitrary string label. Riptide watches for those tags and automatically creates or destroys your component objects as tagged parts appear and disappear in the game world. This is great for hazards, interactive props, pickup items — anything that maps to a physical object.
+:::
+
 Access via `Riptide.ComponentService`.
 
 ## Types

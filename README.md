@@ -1,39 +1,46 @@
 <div align="center">
 
-```text
-    ____  _       __  _     __   
-   / __ \(_)___  / /_(_)___/ /__ 
-  / /_/ / / __ \/ __/ / __  / _ \
- / _, _/ / /_/ / /_/ / /_/ /  __/
-/_/ |_/_/ .___/\__/_/\__,_/\___/ 
-       /_/                       
-```
+<img src="assets/riptide_banner_v4.png" alt="Riptide Banner" width="100%">
 
-[![Luau](https://img.shields.io/badge/Luau-00A2FF?style=flat-square&logo=lua&logoColor=white)](https://luau-lang.org/)
-[![Roblox](https://img.shields.io/badge/Roblox-111111?style=flat-square&logo=roblox&logoColor=white)](https://roblox.com/)
-[![Pesde](https://img.shields.io/badge/pesde-0.8.2-success?style=flat-square)](https://github.com/pesde-pkg)
-[![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
-[![CI](https://github.com/riptide-project/framework/actions/workflows/ci.yml/badge.svg)](https://github.com/riptide-project/framework/actions/workflows/ci.yml)
+<br/>
 
-**A lightweight, strictly-typed, and modular framework for Roblox.**
+<a href="https://github.com/riptide-project/framework"><img src="https://raw.githubusercontent.com/maneetoo/Roblox-OSS-Badges/refs/heads/main/Badges/png/32px/link-github-repository.png" alt="GitHub Repository" height="28"></a>
+<a href="https://riptide-project.github.io/framework"><img src="https://raw.githubusercontent.com/maneetoo/Roblox-OSS-Badges/refs/heads/main/Badges/png/32px/link-documentation.png" alt="Documentation" height="28"></a>
+<a href="https://github.com/riptide-project/framework/releases"><img src="https://raw.githubusercontent.com/maneetoo/Roblox-OSS-Badges/refs/heads/main/Badges/png/32px/link-github-releases.png" alt="GitHub Releases" height="28"></a>
+<a href="CHANGELOG.md"><img src="https://raw.githubusercontent.com/maneetoo/Roblox-OSS-Badges/refs/heads/main/Badges/png/32px/link-changelog.png" alt="Changelog" height="28"></a>
+<a href="https://github.com/pesde-pkg"><img src="https://raw.githubusercontent.com/maneetoo/Roblox-OSS-Badges/refs/heads/main/Badges/png/32px/link-pesde.png" alt="Pesde Package" height="28"></a>
+<a href="https://wally.run/package/riptide/core"><img src="https://raw.githubusercontent.com/maneetoo/Roblox-OSS-Badges/refs/heads/main/Badges/png/32px/link-wally.png" alt="Wally Package" height="28"></a>
+<a href="https://github.com/riptide-project/framework/actions"><img src="https://raw.githubusercontent.com/maneetoo/Roblox-OSS-Badges/refs/heads/main/Badges/png/32px/link-tests.png" alt="Tests" height="28"></a>
 
-[Read the Documentation 📚](https://riptide-project.github.io/framework) • [Releases](https://github.com/riptide-project/framework/releases)
-
-</div>
-
-## 🌊 Why Riptide?
+<br/>
+<br/>
 
 Riptide was built from the ground up for production Roblox games. It solves the most common architecture problems while remaining invisible, staying out of your way, and scaling elegantly.
 
-- **Deterministic Lifecycle:** Phased initialization (`Init` → `Start`) eliminates race conditions.
-- **Dependency Injection:** Ditch circular `require()` chains. Inject your dependencies safely using canonical paths.
-- **Unified Networking:** One single `RemoteEvent` and `RemoteFunction` handle your entire game's network traffic. Zero `ReplicatedStorage` clutter. Let Riptide multiplex everything.
-- **Strictly Typed:** 100% `--!strict` Luau. Enjoy flawless autocomplete and compile-time safety right out of the box.
-- **Built-in Power:** Comes fully loaded with a robust `StateMachine`, `ComponentService`, and `StateReplication`.
+</div>
+
+> [!WARNING]
+> **🌊 Maelstrom Build — Unstable**
+>
+> You are on the **Maelstrom** pre-release channel (`0.9.0-maelstrom.1`). Maelstrom is Riptide's unstable development branch — it ships on a separate Git branch, is **not production-tested**, and APIs may change without notice. If you need stability, pin a [stable release](https://github.com/riptide-project/framework/releases).
+
+---
+
+## ✨ Key Features
+
+- 📅 **Deterministic Lifecycle:** Phased initialization (`Init` → `Start`) ensures modules and plugins load in a predictable, race-free order.
+- 🔌 **Sandboxed Plugins:** A complete `PluginManager` with Kahn's topological sort, cycle detection, and isolated, crash-safe third-party plugins.
+- ⚡ **Zero-Allocation Signals:** A synchronous linked-list signal dispatcher with zero scheduler overhead and no per-fire thread creation.
+- 📡 **Unified Networking:** Multiplexed `RemoteEvent` and `UnreliableRemoteEvent` networking with flat, closure-free middleware chains.
+- 🛡️ **Typed Remote Validation:** Enforce client payload types at the network boundary via `Network.RegisterTyped()` and composable `Guard` validators.
+- 📦 **100% Strict Luau:** Written entirely with `--!strict`, exporting clean API interfaces for full autocomplete and type-checking.
+- 🛠️ **Built-in Power:** Ships with Sleitnick's `Trove` resource tracker, `EventBus` pub/sub, `Guard` schema validators, `StateMachine`, `Async` utilities, and server-authoritative `State` replication.
+
+---
 
 ## 📦 Installation
 
-Riptide is formally distributed via **[Pesde](https://github.com/pesde-pkg/pesde)**. Install it directly into your project using the Pesde CLI:
+### Via Pesde (Recommended)
 
 ```bash
 pesde add riptide/core
@@ -41,60 +48,87 @@ pesde add riptide/core
 
 ### Via Wally
 
-> ⚠️ **Notice**: The `riptide` Wally scope is currently pending server registry synchronization from UpliftGames. For immediate access, please use **Pesde** or the `.rbxm` file.
-
-If you prefer Wally, Riptide will shortly be available on the Wally index:
-
 ```toml
 [dependencies]
-Riptide = "riptide/core@0.8.2"
+Riptide = "riptide/core@0.9.0-maelstrom.1"
 ```
 
-### Manual Installation (.rbxm)
+### Manual (.rbxm)
 
-If you strictly prefer not to use package managers, you can download `Riptide.rbxm` directly from the [Releases](https://github.com/riptide-project/framework/releases) tab and insert it into `ReplicatedStorage.Packages`.
+Download `Riptide.rbxm` from the [Releases](https://github.com/riptide-project/framework/releases) page and place it inside `ReplicatedStorage`.
+
+---
 
 ## 🏁 Quick Look
 
-Write clean, modular code with predictable execution phases.
+Riptide organizes your game logic into **Services** (server) and **Controllers** (client). Each module follows a clean two-phase lifecycle: `Init` runs synchronously before any module starts, and `Start` runs asynchronously afterward.
 
 ```lua
+-- ServerScriptService/Services/CoinsService.lua
 --!strict
-local RiptidePkg = require(ReplicatedStorage.Packages.Riptide)
-type Riptide = RiptidePkg.Riptide
+local CoinsService = {}
 
-local PlayerState = {}
-
-function PlayerState:Init(Riptide: Riptide)
-    self.DataService = Riptide.GetService("DataService")
-    
-    Riptide.Network.Register("PlayerJumped", function(player, height)
-        print(player.Name .. " jumped " .. height .. " studs!")
+function CoinsService:Init(Riptide)
+    -- Init runs synchronously. Register network handlers and grab
+    -- references to other services here — everything is loaded but
+    -- not yet started.
+    Riptide.Network.RegisterTyped("BuyItem", {
+        Riptide.Guard.String(50),       -- itemId:  string, max 50 chars
+        Riptide.Guard.Number(0, 1000),  -- price:   number, 0–1000
+    }, function(player, itemId, price)
+        print(player.Name .. " bought " .. itemId .. " for " .. price .. " coins")
     end)
 end
 
-function PlayerState:Start(Riptide: Riptide)
-    self.DataService:GiveMoney(100)
+function CoinsService:Start(Riptide)
+    -- Start runs in its own coroutine — safe to yield here.
+    self.Trove = Riptide.Trove.new()
+    print("CoinsService is running!")
 end
 
-return PlayerState
+function CoinsService:OnPlayerAdded(Riptide, player)
+    Riptide.State:SetForPlayer(player, "coins", 0)
+end
+
+return CoinsService
 ```
+
+**Launch the framework** from a single server script:
+
+```lua
+-- ServerScriptService/main.server.lua
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+local Riptide = require(ReplicatedStorage.Packages.Riptide)
+
+Riptide.Server.Launch({
+    ModulesFolder = ServerScriptService.Services,
+})
+```
+
+---
 
 ## 🧪 Testing Architecture
 
-Riptide guarantees production stability through a custom **Hybrid Testing Architecture** built on `frktest`.
+Riptide ships with a **Hybrid Testing Architecture** built on [`frktest`](https://github.com/itsfrank/frktest):
 
-- **Development / CI**: Lightning-fast unit tests run via [Lune](https://github.com/lune-org/lune) CLI ensuring 0 millisecond regressions during active coding (`lune run test/lune/RunLuneTests.luau`).
-- **Engine Integration**: The exact same mock-free test suites seamlessly compile and run inside standard Roblox Studio DataModels, validating true Client/Server replication, network invocations, and Instance boundary behaviors.
+- **CI / Development:** 99 unit tests run via [Lune](https://github.com/lune-org/lune) CLI in milliseconds — no Studio required.
+- **Engine Integration:** The exact same suites compile and run inside a real Roblox DataModel for true Client/Server replication validation.
 
-> Every single framework feature (StateReplication, ComponentService, Unified Networking, Async, and StateMachine) is covered by comprehensive Integration tests mapped across both sides of the network boundary.
+```bash
+lune run test/lune/RunLuneTests.luau
+```
+
+---
 
 ## 📚 Documentation
 
-For complete setup guides, API reference, and examples, visit our official documentation site:
+Complete setup guides, API reference, and examples:
 
-**[👉 Go to Riptide Documentation](https://riptide-project.github.io/framework)**
+**[👉 Riptide Documentation](https://riptide-project.github.io/framework)**
+
+---
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT — see [LICENSE](LICENSE).

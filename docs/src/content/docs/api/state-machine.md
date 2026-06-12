@@ -136,3 +136,118 @@ matchFSM.OnStateChanged:Connect(function(oldState, newState)
     print(string.format("Transitioned: %s -> %s", oldState, newState))
 end)
 ```
+
+---
+
+## Full Examples
+
+### Match Phase Manager
+
+A typical server-side game loop using a state machine:
+
+```lua
+-- ServerScriptService/Services/MatchService.lua
+--!strict
+local MatchService = {}
+
+function MatchService:Start(Riptide)
+    local fsm = Riptide.StateMachine.new({
+        InitialState = "Intermission",
+        States = {
+            Intermission = {
+                OnEnter = function(self)
+                    Riptide.State:Set("matchPhase", "Intermission")
+                    Riptide.Network.FireAllClients("ShowCountdown", 15)
+                    task.wait(15)
+                    fsm:TransitionTo("Playing")
+                end,
+            },
+            Playing = {
+                OnEnter = function(self)
+                    Riptide.State:Set("matchPhase", "Playing")
+                    task.wait(120)  -- 2 minute round
+                    fsm:TransitionTo("GameOver", "Time's up!")
+                end,
+            },
+            GameOver = {
+                OnEnter = function(self, reason)
+                    Riptide.State:Set("matchPhase", "GameOver")
+                    Riptide.Network.FireAllClients("ShowGameOver", reason)
+                    task.wait(5)
+                    fsm:TransitionTo("Intermission")
+                end,
+            },
+        },
+    })
+
+    -- Log all transitions for debugging
+    fsm.OnStateChanged:Connect(function(old, new)
+        print(string.format("[Match] %s → %s", old, new))
+    end)
+end
+
+return MatchService
+```
+
+### Character State Controller (Client)
+
+```lua
+-- StarterPlayerScripts/Controllers/CharacterController.lua
+--!strict
+local CharacterController = {}
+
+function CharacterController:Start(Riptide)
+    local character = game.Players.LocalPlayer.Character
+        or game.Players.LocalPlayer.CharacterAdded:Wait()
+
+    local humanoid = character:WaitForChild("Humanoid") :: Humanoid
+    local rootPart  = character:WaitForChild("HumanoidRootPart") :: BasePart
+
+    local fsm = Riptide.StateMachine.new({
+        InitialState = "Idle",
+        States = {
+            Idle = {
+                OnEnter  = function() humanoid.WalkSpeed = 0  end,
+                OnUpdate = function(self, dt)
+                    if humanoid.MoveDirection.Magnitude > 0 then
+                        fsm:TransitionTo("Run")
+                    end
+                end,
+            },
+            Run = {
+                OnEnter  = function() humanoid.WalkSpeed = 16 end,
+                OnUpdate = function(self, dt)
+                    if humanoid.MoveDirection.Magnitude == 0 then
+                        fsm:TransitionTo("Idle")
+                    elseif humanoid:GetState() == Enum.HumanoidStateType.Jumping then
+                        fsm:TransitionTo("Jump")
+                    end
+                end,
+            },
+            Jump = {
+                OnEnter = function() print("Jumped!") end,
+                OnUpdate = function(self, dt)
+                    if humanoid:GetState() == Enum.HumanoidStateType.Freefall then
+                        fsm:TransitionTo("Fall")
+                    end
+                end,
+            },
+            Fall = {
+                OnEnter = function() print("Falling!") end,
+                OnUpdate = function(self, dt)
+                    if humanoid:GetState() == Enum.HumanoidStateType.Landed then
+                        fsm:TransitionTo("Idle")
+                    end
+                end,
+            },
+        },
+    })
+
+    -- Drive the FSM every frame
+    game:GetService("RunService").Heartbeat:Connect(function(dt)
+        fsm:Update(dt)
+    end)
+end
+
+return CharacterController
+```

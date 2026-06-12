@@ -1,160 +1,157 @@
 ---
 title: Module Lifecycle
-description: How Riptide loads, initializes, and starts your modules.
+description: How Riptide loads, initialises, and starts every module — and what you can safely do in each phase.
 ---
 
 
-Riptide uses a deterministic **3-phase lifecycle** to orchestrate your game modules. This eliminates circular-require issues and guarantees all dependencies are available before game logic runs.
+Riptide uses a **three-phase lifecycle** that gives every module a well-defined slot for initialization. Understanding these phases is the key to writing bug-free, race-condition-free code.
+
+---
 
 ## The Three Phases
 
-### 1. Load Phase
-
-Every `ModuleScript` descendant inside your configured `ModulesFolder` (and `SharedModulesFolder`) is `require()`'d. The returned table is registered in the internal module registry under a **canonical ID**.
-
 ```
-SharedModulesFolder loaded first → ModulesFolder loaded second
+╔═══════════╗      ╔════════════╗      ╔═══════════╗
+║   LOAD    ║ ───▶ ║    INIT    ║ ───▶ ║   START   ║
+╚═══════════╝      ╚════════════╝      ╚═══════════╝
+
+All modules       All :Init()s       All :Start()s
+are require()d    run in sequence,   run in parallel
+first.            synchronously.     (task.spawn).
 ```
 
-:::note
-Shared modules are loaded **before** side-specific modules, so server services and client controllers can depend on shared utilities.
+### Phase 1 — Load
+
+Riptide `require()`s every Lua module it finds in the folders you passed to `Launch`. No lifecycle methods are called yet — this is pure module loading. Every return value is stored internally by its module name.
+
+### Phase 2 — Init
+
+Riptide calls `:Init(Riptide)` on every module that defines it, **one at a time**, in load order. Because they run in sequence, you can safely call `Riptide.GetService()` / `Riptide.GetController()` to access other modules — they are already loaded, even if their own `Init` hasn't run yet.
+
+:::caution[Do not yield in Init]
+`Init` runs synchronously. **Never** call `task.wait`, `Instance:WaitForChild`, `RemoteEvent.OnServerEvent:Wait()`, or any other yielding call inside `Init`. Yielding here blocks all other modules from initializing and will likely deadlock your game.
 :::
 
-### 2. Init Phase (synchronous)
+### Phase 3 — Start
 
-After all modules are loaded, Riptide calls `Init` on every module **synchronously** and in order:
+Once **every** module has finished `Init`, Riptide calls `:Start(Riptide)` on each module — wrapped in `task.spawn`, so they all run **concurrently**. You can yield freely here: start loops, wait for events, kick off async work, etc.
+
+---
+
+## Rule of Thumb
+
+| Task | Phase |
+|---|---|
+| Store a reference to another Service/Controller | `Init` |
+| Register a `Network` event handler | `Init` |
+| Set initial `State` values | `Init` |
+| Set up `ComponentService` | `Init` |
+| Start a while-true game loop | `Start` |
+| `task.wait` or `WaitForChild` | `Start` |
+| Connect to `Players.PlayerAdded` signals | `Start` _(or use `OnPlayerAdded`)_ |
+| Connect a UI event (GuiButton.Activated) | `Start` |
+
+---
+
+## Player Hooks
+
+Two additional lifecycle methods are automatically called for you:
+
+| Method | When |
+|---|---|
+| `:OnPlayerAdded(Riptide, player)` | A player joins. Also fires **retroactively** for any players already in the server when Riptide boots. |
+| `:OnPlayerRemoving(Riptide, player)` | A player leaves. |
+
+---
+
+## Annotated Full Example
 
 ```lua
-function MyService:Init(Riptide: Riptide)
-    -- `self` = your module table (MyService)
-    -- `Riptide` = the framework reference
+-- ServerScriptService/Services/DataService.lua
+--!strict
 
-    -- Safe to call GetService / GetController here
-    self.DataService = Riptide.GetService("DataService")
+local DataService = {}
 
-    -- Safe to register network handlers
-    Riptide.Network.Register("FetchCoins", function(player)
-        return self:GetCoins(player)
+-- Called once, in sequence, before Start.
+function DataService:Init(Riptide)
+    -- ✅ Safe: grab a reference to another service.
+    -- Even if EconomyService's Init hasn't run yet, it IS loaded.
+    self.Economy = Riptide.GetService("EconomyService")
+
+    -- ✅ Safe: register network handlers.
+    Riptide.Network.Register("GetCoins", function(player)
+        return Riptide.State:GetForPlayer(player, "coins")
     end)
+
+    -- ❌ WRONG: never yield in Init.
+    -- task.wait(1)  ← this would block all other modules!
 end
-```
 
-Since Init is synchronous, all modules have been loaded (but not yet started) when your Init runs. This is the correct place for dependency injection.
-
-:::important
-All lifecycle methods use **colon `:` syntax**, meaning `self` (your module table) is the implicit first argument and `Riptide` (the framework reference) is the second. Module getters like `GetService` and `GetController` use **dot `.` syntax** — they are standalone functions, not methods:
-```lua
--- ✅ Correct
-Riptide.GetService("DataService")
-
--- ❌ Wrong — will pass Riptide as `name`
-Riptide:GetService("DataService")
-```
-:::
-
-### 3. Start Phase (asynchronous)
-
-After **all** Init calls complete, Riptide calls `Start` on every module via `task.spawn`:
-
-```lua
-function MyService:Start(Riptide: Riptide)
-    -- All modules are fully initialized — safe to interact
+-- Called once everything has Init'd. Runs in its own task.spawn.
+function DataService:Start(Riptide)
+    -- ✅ Safe to yield in Start.
     while true do
-        self:TickGameLoop()
-        task.wait(1)
+        task.wait(30)
+        self:_autosaveAll()
     end
 end
-```
 
-Since each `Start` runs in its own coroutine, one module yielding does not block others.
+-- Fires for players already online AND new joiners.
+function DataService:OnPlayerAdded(Riptide, player)
+    -- ✅ Safe to yield (runs in task.spawn).
+    local data = self:_loadFromDataStore(player)
+    Riptide.State:SetForPlayer(player, "coins", data.coins)
+    Riptide.State:SetForPlayer(player, "level", data.level)
+end
+
+function DataService:OnPlayerRemoving(Riptide, player)
+    self:_saveToDataStore(player)
+end
+
+-- Private helpers (prefixed with _ by convention)
+function DataService:_loadFromDataStore(player)
+    -- task.wait() is fine here — called from Start/OnPlayerAdded
+    task.wait(0.1)  -- simulated async load
+    return { coins = 0, level = 1 }
+end
+
+function DataService:_saveToDataStore(player)
+    print("Saving data for", player.Name)
+end
+
+function DataService:_autosaveAll()
+    print("Autosaving all player data...")
+end
+
+return DataService
+```
 
 ---
 
-## Canonical Module IDs
-
-Every module is registered with a **canonical ID** based on its relative path from the modules folder:
-
-```
-ModulesFolder/
-├── Economy/
-│   └── PlayerData.lua    → "Economy/PlayerData"
-├── Combat/
-│   └── DamageService.lua → "Combat/DamageService"
-└── MatchService.lua      → "MatchService"
-```
-
-### Lookup Rules
+## Accessing Other Modules
 
 ```lua
--- Canonical ID — always works
-Riptide.GetService("Economy/PlayerData")
+function MyService:Init(Riptide)
+    -- Server: get a Service by name
+    local Economy = Riptide.GetService("EconomyService")
 
--- Short alias — works only when the name is unique
-Riptide.GetService("PlayerData")
+    -- Client: get a Controller by name
+    local UI = Riptide.GetController("UIController")
 
--- Ambiguous alias — returns nil + warning
--- (e.g. two modules named "Utils" in different folders)
-Riptide.GetService("Utils")  -- ⚠️ nil
+    -- Shared modules (loaded by SharedModulesFolder) are
+    -- accessed via require() directly, like normal Lua modules.
+    local Config = require(ReplicatedStorage.SharedModules.Config)
+end
 ```
 
----
-
-## Module Getters
-
-| Method                | Context     | Syntax | Description                                    |
-|-----------------------|-------------|--------|------------------------------------------------|
-| `Riptide.GetModule(name)` | Shared  | dot `.` | Universal module lookup by canonical ID or alias. |
-| `Riptide.GetService(name)` | Server | dot `.` | Alias for `GetModule`. **Errors** if called on client. |
-| `Riptide.GetController(name)` | Client | dot `.` | Alias for `GetModule`. **Errors** if called on server. |
-
-:::caution
-Calling `GetService` on the client or `GetController` on the server will throw a runtime error. Use the context-appropriate getter for type safety and clear intent.
+:::note[Dot not colon]
+`GetService` and `GetController` are plain functions — call them with **dot syntax**, not colon syntax. Using colon syntax passes `Riptide` as the name argument, which will return `nil`.
 :::
 
 ---
 
-## Example Module
+## Next Steps
 
-```lua
---!strict
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RiptidePkg = require(ReplicatedStorage.Packages.Riptide)
-type Riptide = RiptidePkg.Riptide
-
-local CoinsService = {}
-
-function CoinsService:Init(Riptide: Riptide)
-    -- Store framework references for later use in Start and lifecycle hooks
-    self.State = Riptide.State
-
-    Riptide.Network.Register("GetCoins", function(player)
-        return self.State:Get("coins", player)
-    end)
-end
-
-function CoinsService:Start(Riptide: Riptide)
-    print("CoinsService is running!")
-end
-
-function CoinsService:OnPlayerAdded(Riptide: Riptide, player: Player)
-    -- In lifecycle hooks, prefer using the `Riptide` argument directly
-    -- rather than `self.State`, as retroactive hooks may fire before Init.
-    Riptide.State:SetForPlayer(player, "coins", 100)
-end
-
-return CoinsService
-```
-
----
-
-## Lifecycle Summary
-
-```
-require() all ModuleScripts    ← Load Phase
-            │
-            ▼
-Init(Riptide) — synchronous    ← Init Phase (inject deps)
-            │
-            ▼
-Start(Riptide) — task.spawn    ← Start Phase (run logic)
-```
+- **[Network](../../api/network/)** — register and fire remote events.
+- **[State Replication](../../api/state-replication/)** — sync data from server to clients.
+- **[Utilities](../../api/utilities/)** — `Trove`, `EventBus`, `Guard`, `Async`.

@@ -1,14 +1,21 @@
 ---
 title: Utilities
-description: Async and Signal primitives bundled with Riptide.
+description: Trove, Signal, Async, EventBus, and Guard — bundled with Riptide.
 ---
 
 
-Riptide bundles two essential utility modules — **Async** and **Signal** — so you don't need external dependencies like `Promise` or `GoodSignal`.
+Riptide bundles five essential utility modules so you don't need separate dependencies for the most common patterns:
 
-Access via `Riptide.Async` and `Riptide.Signal`.
+| Utility | Access | Purpose |
+|---|---|---|
+| `Async` | `Riptide.Async` | Timeouts, retries, parallel execution |
+| `Signal` | `Riptide.Signal` | Zero-allocation custom events |
+| `Trove` | `Riptide.Trove` | Resource cleanup tracking |
+| `EventBus` | `Riptide.EventBus` | Pub/sub messaging between modules |
+| `Guard` | `Riptide.Guard` | Runtime type validation |
 
 ---
+
 
 ## Async
 
@@ -147,7 +154,11 @@ local onScoreChanged = Riptide.Signal.new()
 Signal:Connect(fn: (...any) -> ()) -> Connection
 ```
 
-Connects a callback to the signal. The callback is invoked via `task.spawn` whenever `Fire` is called.
+Connects a callback to the signal. The callback is invoked **synchronously in the caller's thread** whenever `Fire` is called.
+
+:::caution
+Do **not** yield inside a `:Connect` callback (no `task.wait`, no `coroutine.yield`). If you need deferred execution, wrap the body in `task.defer` or `task.spawn` yourself.
+:::
 
 Returns a `Connection` object.
 
@@ -181,7 +192,11 @@ end)
 Signal:Fire(...any) -> ()
 ```
 
-Fires the signal, calling all connected callbacks with the provided arguments. Each callback runs in its own coroutine via `task.spawn`, so one yielding callback does not block others.
+Fires the signal, calling all connected callbacks **synchronously** with the provided arguments. Because dispatch is in-thread, no new coroutines are created — this is a zero-allocation hot path.
+
+:::caution
+Callbacks must not yield. If a callback needs to do async work, it should `task.defer` or `task.spawn` internally.
+:::
 
 ```lua
 onScoreChanged:Fire(150)
@@ -252,3 +267,162 @@ print(conn.Connected)  -- false
 ```
 
 After disconnecting, all internal references (`_signal`, `_fn`, `_next`) are cleared to prevent memory leaks.
+
+---
+
+## Trove
+
+A resource cleanup tracking helper based on Sleitnick's Trove pattern. Exposes scoped tracking for signals, connections, instances, and generic functions.
+
+Access via `Riptide.Trove`.
+
+### `Trove.new`
+
+```lua
+Riptide.Trove.new() -> Trove
+```
+
+Creates a new resource tracking Trove instance.
+
+```lua
+local trove = Riptide.Trove.new()
+```
+
+### `Trove:Add`
+
+```lua
+trove:Add(object: any, cleanupMethod: string?) -> any
+```
+
+Tracks any cleanable object. Automatically infers the cleanup method (checks for `:Destroy()`, `:Disconnect()`, or if the object is a function, executes it). A custom cleanup method name can optionally be passed.
+
+```lua
+-- Track a function
+trove:Add(function()
+    print("Cleaned up function!")
+end)
+
+-- Track a custom object
+trove:Add(myCustomObject, "CustomCleanup")
+```
+
+### `Trove:Connect`
+
+```lua
+trove:Connect(signal: any, callback: (...any) -> ()) -> Connection
+```
+
+Connects a callback to a signal and tracks the resulting connection within the trove.
+
+```lua
+trove:Connect(game.Players.PlayerAdded, function(player)
+    print("Player added:", player.Name)
+end)
+```
+
+### `Trove:Clean`
+
+```lua
+trove:Clean() -> ()
+```
+
+Cleans up all tracked resources in the reverse order that they were added (LIFO) and clears the trove container.
+
+```lua
+trove:Clean()
+```
+
+---
+
+## EventBus
+
+A lightweight, isolated pub/sub messenger for inter-module communication. Wrapped in error boundaries so crashing listeners do not block others.
+
+Access via `Riptide.EventBus`.
+
+### `EventBus.new`
+
+```lua
+Riptide.EventBus.new() -> EventBus
+```
+
+Creates a new EventBus instance.
+
+```lua
+local bus = Riptide.EventBus.new()
+```
+
+### `EventBus:On`
+
+```lua
+bus:On(eventName: string, callback: (...any) -> ()) -> () -> ()
+```
+
+Registers a callback for `eventName`. Returns an unsubscribe function that disconnects the listener when invoked.
+
+```lua
+local unsub = bus:On("ScoreUpdated", function(score)
+    print("New score:", score)
+end)
+
+-- Unsubscribe later:
+unsub()
+```
+
+### `EventBus:Emit`
+
+```lua
+bus:Emit(eventName: string, ...: any) -> ()
+```
+
+Fires the event, calling all registered listeners synchronously with the provided arguments. Uses `xpcall` to isolate crashing listeners.
+
+```lua
+bus:Emit("ScoreUpdated", 1500)
+```
+
+### `EventBus:Clear`
+
+```lua
+bus:Clear() -> ()
+```
+
+Removes all registered listeners from the EventBus instance.
+
+```lua
+bus:Clear()
+```
+
+---
+
+## Guard
+
+A lightweight, zero-dependency type verification utility library for securing network boundaries and runtime argument validation.
+
+Access via `Riptide.Guard`.
+
+### Validators
+
+- **`Guard.Number(min: number?, max: number?)`**: Validates a number, supporting optional boundaries (e.g. `Guard.Number(0, 100)`). Rejects `NaN`.
+- **`Guard.String(maxLength: number?)`**: Validates a string, supporting an optional length boundary.
+- **`Guard.Boolean()`**: Validates a boolean value (`true` or `false`).
+- **`Guard.Enum(values: { any })`**: Validates that a value is contained in the whitelist array.
+- **`Guard.Table(schema: { [string]: Validator })`**: Validates structured tables against schema mapping rules.
+- **`Guard.Optional(validator: Validator)`**: Allows the value to be `nil` or match the nested validator.
+- **`Guard.Instance(className: string)`**: Validates that the userdata matches the Roblox engine className (supports Lune mocks during tests).
+
+### Example Usage
+
+```lua
+-- Validate a table payload
+local isUserSchema = Guard.Table({
+    name = Guard.String(50),
+    age = Guard.Number(0, 150),
+    isAdmin = Guard.Optional(Guard.Boolean()),
+})
+
+local ok, err = isUserSchema({ name = "Bob", age = 25 })
+if not ok then
+    warn("Validation error: " .. tostring(err))
+end
+```

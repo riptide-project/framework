@@ -1,10 +1,12 @@
 ---
 title: Network
-description: Unified event and request communication between client and server.
+description: Unified event communication between client and server.
 ---
 
 
-The `Network` module provides a unified communication layer over a single `RemoteEvent` and `RemoteFunction` pair. All networking goes through named string dispatchers — no manual remote management required.
+The `Network` module provides a unified communication layer over a single `RemoteEvent` / `UnreliableRemoteEvent` pair. All networking goes through **named string dispatchers** — no manual remote management required.
+
+> **v0.9.1 breaking change:** `RemoteFunction`-based APIs (`InvokeClient`, `InvokeServer`) have been removed. Use `Riptide.Async` over paired `FireServer`/`FireClient` calls for request/response patterns instead.
 
 Access via `Riptide.Network`.
 
@@ -25,12 +27,10 @@ type NetworkAPI = {
     FireAllClients: ((funcName: string, ...any) -> ())?,
     UnreliableFireClient: ((player: Player, funcName: string, ...any) -> ())?,
     UnreliableFireAllClients: ((funcName: string, ...any) -> ())?,
-    InvokeClient: ((player: Player, funcName: string, ...any) -> any)?,
 
     -- Client-only
     FireServer: ((funcName: string, ...any) -> ())?,
     UnreliableFireServer: ((funcName: string, ...any) -> ())?,
-    InvokeServer: ((funcName: string, ...any) -> any)?,
 }
 ```
 
@@ -44,7 +44,7 @@ type NetworkAPI = {
 Network.Register(funcName: string, callback: Callback) -> ()
 ```
 
-Registers a handler for a named network event or request. Multiple handlers can be registered for the same name — all will be called for events, but only the **first** is used for invokes.
+Registers a handler for a named network event. Multiple handlers can be registered for the same name — all are called.
 
 **Server example** — callback receives `player` as the first argument:
 
@@ -62,8 +62,31 @@ Riptide.Network.Register("ShowNotification", function(message)
 end)
 ```
 
-:::note
-For invoke handlers (`InvokeServer` / `InvokeClient`), only the **first** registered handler is called. If multiple handlers are registered, a warning is emitted.
+---
+
+### `RegisterTyped`
+
+```lua
+Network.RegisterTyped(funcName: string, validators: { (value: any) -> (boolean, string?) }, callback: Callback) -> ()
+```
+
+Like `Register`, but each argument from the client is validated against a matching `Guard` validator before the callback runs. If **any** argument fails, the event is silently dropped and a warning is logged — the callback never fires.
+
+This is the recommended way to handle **any client-to-server event** where you care about data integrity.
+
+```lua
+-- Guard validators enforce types at the network boundary
+Riptide.Network.RegisterTyped("BuyItem", {
+    Riptide.Guard.String(50),       -- arg1: itemId,  string max 50 chars
+    Riptide.Guard.Number(0, 1000),  -- arg2: price,   number 0–1000
+}, function(player, itemId, price)
+    -- Only reaches here if both arguments passed validation
+    print(player.Name, "buys", itemId, "for", price, "coins")
+end)
+```
+
+:::tip
+Combine with `UseMiddleware` for server-wide checks (authentication, rate limiting) that run before individual handlers.
 :::
 
 ---
@@ -94,31 +117,33 @@ Riptide.Network.Unregister("Ping", onPing)
 Network.UseMiddleware(scope: "server" | "client", middleware: Middleware) -> ()
 ```
 
-Adds a middleware function to the processing pipeline. Middlewares execute **in order** of registration and must call `next(...)` to continue the chain.
+Adds a middleware function to the processing pipeline. Middlewares run as a flat **for-loop** — no closures, no recursion. Each middleware receives the payload `args` table **by reference** and may mutate it in place.
 
 **Server middleware signature:**
 
 ```lua
-Riptide.Network.UseMiddleware("server", function(player, funcName, next, ...)
-    -- Validate, rate-limit, log, etc.
+-- (player, funcName, args: {any}) -> boolean?
+Riptide.Network.UseMiddleware("server", function(player, funcName, args)
     if not isAuthenticated(player) then
-        return nil  -- block the request
+        return false  -- return false to abort the chain
     end
-    return next(...)  -- continue to handler
+    -- mutate args in-place if needed, e.g. args[1] = sanitize(args[1])
+    -- return nothing (or true) to continue
 end)
 ```
 
 **Client middleware signature:**
 
 ```lua
-Riptide.Network.UseMiddleware("client", function(funcName, next, ...)
+-- (funcName, args: {any}) -> boolean?
+Riptide.Network.UseMiddleware("client", function(funcName, args)
     print("[Network] Received:", funcName)
-    return next(...)
+    -- no return = continue chain
 end)
 ```
 
 :::caution
-If a middleware does **not** call `next(...)`, the handler at the end of the chain will never execute. This is intentional for blocking (e.g., auth/rate-limit) middlewares.
+Returning `false` from a middleware **aborts the entire chain** — no subsequent middlewares or handlers will execute. Any other return value (including `nil`) allows the chain to continue.
 :::
 
 ---
@@ -140,7 +165,7 @@ Riptide.Network.ClearMiddlewares()           -- both
 
 ## Server-Only Methods
 
-These methods are only available when running on the server. Calling them on the client will error.
+These methods are only available when running on the server.
 
 ### `FireClient`
 
@@ -173,37 +198,21 @@ Network.UnreliableFireClient(player: Player, funcName: string, ...any) -> ()
 Network.UnreliableFireAllClients(funcName: string, ...any) -> ()
 ```
 
-Fires a named event over an `UnreliableRemoteEvent`. Perfect for high-frequency, non-critical data like particles, hitmarkers, or positional updates where dropped packets shouldn't stall the network.
+Fires a named event over an `UnreliableRemoteEvent`. Ideal for high-frequency, non-critical data like particles, hitmarkers, or positional updates.
 
 ```lua
 Riptide.Network.UnreliableFireAllClients("PlayerRotated", player, CFrame.new())
 ```
 
 :::tip
-Unreliable events transparently route to the *same* `Register` callbacks. The receiving code doesn't need to know if the event was sent reliably or unreliably!
-:::
-
-### `InvokeClient`
-
-```lua
-Network.InvokeClient(player: Player, funcName: string, ...any) -> any
-```
-
-Invokes a handler on a specific client and returns the result. **Yields** until the client responds.
-
-```lua
-local clientFps = Riptide.Network.InvokeClient(player, "GetFPS")
-```
-
-:::caution
-`InvokeClient` yields the calling thread and trusts client responses. Use with care in production — prefer event-based patterns when possible.
+Unreliable events route to the same `Register` callbacks. The receiving side doesn't need to know which transport was used.
 :::
 
 ---
 
 ## Client-Only Methods
 
-These methods are only available on the client. Calling them on the server will error.
+These methods are only available on the client.
 
 ### `FireServer`
 
@@ -223,35 +232,37 @@ Riptide.Network.FireServer("RequestPurchase", itemId, quantity)
 Network.UnreliableFireServer(funcName: string, ...any) -> ()
 ```
 
-Fires a named event to the server over an `UnreliableRemoteEvent`. Use for extremely frequent inputs (like aim direction).
+Fires a named event to the server over an `UnreliableRemoteEvent`. Use for extremely frequent inputs (e.g., aim direction).
 
 ```lua
 Riptide.Network.UnreliableFireServer("UpdateAimDirection", Vector3.new(0, 1, 0))
-```
-
-### `InvokeServer`
-
-```lua
-Network.InvokeServer(funcName: string, ...any) -> any
-```
-
-Invokes a handler on the server and returns the result. **Yields** until the server responds.
-
-```lua
-local inventory = Riptide.Network.InvokeServer("GetInventory")
 ```
 
 ---
 
 ## Architecture
 
-Under the hood, Riptide creates exactly **three** remotes inside the package:
+Under the hood, Riptide creates exactly **two** remotes inside the package:
 
 ```
 Riptide/shared/Remotes/
 ├── EventDispatcher           (RemoteEvent)
-├── UnreliableEventDispatcher (UnreliableRemoteEvent)
-└── FunctionDispatcher        (RemoteFunction)
+└── UnreliableEventDispatcher (UnreliableRemoteEvent)
 ```
 
-All named events and invokes are multiplexed through these instances using the `funcName` string as a discriminator. This eliminates `ReplicatedStorage` clutter and centralizes all network traffic.
+All named events are multiplexed through these instances using the `funcName` string as a discriminator. This eliminates `ReplicatedStorage` clutter and centralizes all network traffic.
+
+For request/response patterns (previously handled by `RemoteFunction`), use `Riptide.Async` over a pair of `FireServer`/`FireClient` events:
+
+```lua
+-- Server: respond to a client request
+Riptide.Network.Register("GetInventory", function(player)
+    Riptide.Network.FireClient(player, "GetInventory_Response", getPlayerInventory(player))
+end)
+
+-- Client: fire + wait for response
+Riptide.Network.FireServer("GetInventory")
+local inventory = Riptide.Network.Register("GetInventory_Response", function(data)
+    -- handle data
+end)
+```

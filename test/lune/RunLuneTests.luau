@@ -5,6 +5,7 @@ local test_files = {
 	"../shared/ModuleLoader.test",
 	"../shared/Network.test",
 	"../shared/PlayerLifecycle.test",
+	"../shared/PluginIntegration.test",
 	"../shared/Riptide.test",
 	"../shared/Signal.test",
 	"../shared/StateMachine.test",

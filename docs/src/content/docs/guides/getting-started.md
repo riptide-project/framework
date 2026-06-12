@@ -1,63 +1,58 @@
 ---
 title: Getting Started
-description: A quick start guide to installing Riptide and writing your first service.
+description: Install Riptide, write your first Service and Controller, and launch your game.
 ---
 
-Welcome to Riptide! This guide will walk you through installing the framework, writing your first service, and launching your game.
+
+Welcome to Riptide! This guide walks you through every step — from installation to your first working Service and Controller — with no prior framework experience required.
+
+---
 
 ## 1. Installation
 
 ### Via Pesde (Recommended)
 
-Riptide is formally distributed via [pesde](https://github.com/pesde-pkg/pesde). To install it, run the following command in your terminal:
+[Pesde](https://github.com/pesde-pkg/pesde) is the recommended Luau package manager. Install it by following the [Pesde docs](https://github.com/pesde-pkg/pesde#installation), then run:
 
 ```bash
 pesde add riptide/core
 ```
 
+Pesde places Riptide inside `luau_packages/`. You reference it from your Rojo project as a `Packages` folder in `ReplicatedStorage`.
+
 ### Via Wally
-
-:::caution[Wally Scope Pending]
-The `riptide` Wally scope is currently awaiting registry synchronization. For immediate installation, please use **Pesde** or the manual `.rbxm` download below.
-:::
-
-If you strictly prefer Wally, add this to your `wally.toml`:
 
 ```toml
 [dependencies]
-Riptide = "riptide/core@0.8.2"
+Riptide = "riptide/core@0.9.0-maelstrom.1"
 ```
 
 ### Manual Installation (.rbxm)
 
-If you prefer not to use a package manager, download `Riptide.rbxm` from the [latest GitHub release](https://github.com/riptide-project/framework/releases/latest) and explicitly place it inside `ReplicatedStorage.Packages`.
-
-### Riptide CLI (Under Development)
-
-:::note
-A dedicated `riptide` CLI tool is currently in active development. In the future, this CLI will automatically scaffold new projects, generate module files, and configure your sync tools with a single command. Until then, standard manual setup is required.
-:::
+Download `Riptide.rbxm` from the [latest release](https://github.com/riptide-project/framework/releases/latest) and drop it into `ReplicatedStorage/Packages/`.
 
 ---
 
-## 2. Rojo Setup
+## 2. Rojo Project Setup
 
-If you are using Rojo to sync your code into Roblox Studio, here is the recommended `default.project.json` configuration. It properly routes your packages, server scripts, client scripts, and shared modules:
+[Rojo](https://rojo.space) syncs your local code files into Roblox Studio. Create a `default.project.json` at the root of your project:
 
 ```json
 {
-  "name": "riptide-project",
+  "name": "my-riptide-game",
   "tree": {
     "$className": "DataModel",
     "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
       "Packages": {
-        "$path": "roblox_packages"
+        "$path": "luau_packages"
       },
       "SharedModules": {
         "$path": "src/shared"
       }
     },
     "ServerScriptService": {
+      "$className": "ServerScriptService",
       "main": {
         "$path": "src/server/main.server.lua"
       },
@@ -66,7 +61,9 @@ If you are using Rojo to sync your code into Roblox Studio, here is the recommen
       }
     },
     "StarterPlayer": {
+      "$className": "StarterPlayer",
       "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
         "main": {
           "$path": "src/client/main.client.lua"
         },
@@ -82,120 +79,215 @@ If you are using Rojo to sync your code into Roblox Studio, here is the recommen
 This produces the following hierarchy inside Roblox Studio:
 
 ```
+ReplicatedStorage/
+├── Packages/           ← Riptide and other dependencies
+└── SharedModules/      ← code used by both server and client
+
 ServerScriptService/
-├── main                    (Script)
-└── Services/               (Folder)
+├── main               ← server entry point (Script)
+└── Services/          ← server-only modules (Folder)
 
 StarterPlayer/StarterPlayerScripts/
-├── main                    (LocalScript)
-└── Controllers/            (Folder)
+├── main               ← client entry point (LocalScript)
+└── Controllers/       ← client-only modules (Folder)
+```
 
-ReplicatedStorage/
-├── Packages/               (installed dependencies)
-└── SharedModules/          (shared code)
+Create the matching local folders:
+
+```
+src/
+├── shared/            ← SharedModules
+├── server/
+│   ├── main.server.lua
+│   └── Services/
+└── client/
+    ├── main.client.lua
+    └── Controllers/
 ```
 
 ---
 
-## 3. Your First Service
+## 3. Your First Service (Server)
 
-In Riptide, game logic lives inside **modules** (Services on the server, Controllers on the client).
+In Riptide, server-side game logic lives in **Services** — plain Lua tables with special lifecycle methods.
 
-Let's create a simple Server service that prints a message when a player joins.
-
-1. Create a `Folder` in `ServerScriptService` and name it `Services`.
-2. Inside `Services`, create a `ModuleScript` named `HelloService`.
-3. Paste the following code:
+Create `src/server/Services/HelloService.lua`:
 
 ```lua
--- ServerScriptService/Services/HelloService.lua
+-- src/server/Services/HelloService.lua
+--!strict
+
 local HelloService = {}
 
--- The `:` colon syntax means `self` (HelloService table) is the implicit first argument.
--- `Riptide` is the framework reference passed as the second argument.
+--[[
+    Init(Riptide) — runs SYNCHRONOUSLY before any module starts.
+    Use this phase to:
+      • store references to other services
+      • register network event handlers
+      • set up initial state
+    Do NOT yield here (no task.wait, no async calls).
+]]
 function HelloService:Init(Riptide)
-    print("HelloService initialized!")
+    print("HelloService:Init — framework is setting up!")
 end
 
+--[[
+    Start(Riptide) — runs ASYNCHRONOUSLY (via task.spawn) after ALL
+    modules have finished Init. Use this phase to:
+      • start game loops
+      • connect to events
+      • yield freely
+]]
 function HelloService:Start(Riptide)
-    print("HelloService started!")
+    print("HelloService:Start — everything is ready!")
 end
 
+--[[
+    OnPlayerAdded(Riptide, player) — called when a player joins.
+    Also fires retroactively for players already in the server
+    at the moment Riptide launches.
+]]
 function HelloService:OnPlayerAdded(Riptide, player)
-    print("Welcome to the game, " .. player.Name .. "!")
+    print("Welcome, " .. player.Name .. "!")
+end
+
+--[[
+    OnPlayerRemoving(Riptide, player) — called when a player leaves.
+    Use this to clean up player-specific data.
+]]
+function HelloService:OnPlayerRemoving(Riptide, player)
+    print("Goodbye, " .. player.Name .. "!")
 end
 
 return HelloService
 ```
 
-Riptide will automatically call `Init` (synchronously), then `Start` (via `task.spawn`). The `OnPlayerAdded` hook fires whenever a player joins the server.
+:::note[Colon vs. dot syntax]
+Lifecycle methods (`Init`, `Start`, `OnPlayerAdded`, `OnPlayerRemoving`) are called with **colon syntax** — `self` (your module table) is automatically the first argument, and `Riptide` is the second.
 
-:::note
-Inside `OnPlayerAdded`, always use the `Riptide` argument (not `self.State` or other fields set during `Init`) to access framework APIs. See [Player Lifecycle](../../api/player-lifecycle/) for details.
+Module lookup methods (`GetService`, `GetController`) are called with **dot syntax** — they are plain functions, not methods:
+```lua
+-- ✅ Correct
+local DataService = Riptide.GetService("DataService")
+
+-- ❌ Wrong — passes Riptide as the name argument
+local DataService = Riptide:GetService("DataService")
+```
 :::
 
 ---
 
-## 4. Launching the Framework
+## 4. Your First Controller (Client)
 
-Riptide does **not** start automatically. You must explicitly tell it where your modules are and launch it from both the server and client.
+Client-side logic lives in **Controllers** — same idea, different folder.
+
+Create `src/client/Controllers/HelloController.lua`:
+
+```lua
+-- src/client/Controllers/HelloController.lua
+--!strict
+
+local HelloController = {}
+
+function HelloController:Init(Riptide)
+    -- Listen for a network event fired by the server
+    Riptide.Network.Register("ServerGreeting", function(message)
+        print("Server says:", message)
+    end)
+end
+
+function HelloController:Start(Riptide)
+    -- Tell the server we are ready
+    Riptide.Network.FireServer("ClientReady")
+    print("HelloController started on the client!")
+end
+
+return HelloController
+```
+
+---
+
+## 5. Launch Entry Scripts
+
+Riptide does **not** start automatically. You must call `Launch` from both your server and client entry scripts.
 
 ### Server Entry Point
 
-Create a standard `Script` inside `ServerScriptService` (e.g., `main.server.lua`):
+Create `src/server/main.server.lua`:
 
 ```lua
--- ServerScriptService/main.server.lua
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+-- src/server/main.server.lua
+--!strict
+local ReplicatedStorage   = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
+-- Require Riptide from the Packages folder
 local Riptide = require(ReplicatedStorage.Packages.Riptide)
 
 Riptide.Server.Launch({
+    -- Required: the Folder containing your server Services
     ModulesFolder = ServerScriptService.Services,
-    SharedModulesFolder = ReplicatedStorage.SharedModules, -- optional
+
+    -- Optional: shared modules loaded BEFORE Services
+    SharedModulesFolder = ReplicatedStorage.SharedModules,
 })
 ```
 
 ### Client Entry Point
 
-Create a `LocalScript` inside `StarterPlayerScripts` (e.g., `main.client.lua`):
+Create `src/client/main.client.lua`:
 
 ```lua
--- StarterPlayer/StarterPlayerScripts/main.client.lua
+-- src/client/main.client.lua
+--!strict
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Players = game:GetService("Players")
+local Players           = game:GetService("Players")
 
 local Riptide = require(ReplicatedStorage.Packages.Riptide)
 
 Riptide.Client.Launch({
+    -- Required: the Folder containing your client Controllers
     ModulesFolder = Players.LocalPlayer.PlayerScripts.Controllers,
-    SharedModulesFolder = ReplicatedStorage.SharedModules, -- optional
+
+    -- Optional: shared modules loaded BEFORE Controllers
+    SharedModulesFolder = ReplicatedStorage.SharedModules,
 })
 ```
 
-:::tip
-`SharedModulesFolder` is optional. If provided, shared modules are loaded **before** side-specific modules, so services and controllers can depend on shared code during `Init`. See [Project Structure](../project-structure/) for details.
-:::
-
 ---
 
-## 5. Play the Game!
+## 6. Start Rojo & Play
 
-Press **Play** in Roblox Studio. In your Output window, you should see:
+1. Run `rojo serve` in your terminal.
+2. Connect via the Rojo Studio plugin.
+3. Press **Play** in Roblox Studio.
+
+You should see this in the **Output** window:
 
 ```
 🌊 [Riptide] Server Initialization Started...
-HelloService initialized!
-HelloService started!
+HelloService:Init — framework is setting up!
+HelloService:Start — everything is ready!
 🌊 [Riptide] ✅ Server Start Phase Dispatched.
-Welcome to the game, Player1!
+Welcome, Player1!
 ```
 
-Congratulations! You've successfully built your first Riptide project.
+And on the client:
+
+```
+🌊 [Riptide] Client Initialization Started...
+HelloController started on the client!
+🌊 [Riptide] ✅ Client Start Phase Dispatched.
+```
+
+Congratulations — you have a working Riptide project! 🎉
+
+---
 
 ## Next Steps
 
-To learn more about how Riptide structures a full game, check out:
-- **[Project Structure](../project-structure/)** — How to organize your folders.
-- **[Module Lifecycle](../module-lifecycle/)** — How the Load/Init/Start cycle works in detail.
+- **[Project Structure](../project-structure/)** — recommended folder layout for larger games.
+- **[Module Lifecycle](../module-lifecycle/)** — understand the Load / Init / Start phases in depth.
+- **[Network](../../api/network/)** — fire events between server and client.
+- **[State Replication](../../api/state-replication/)** — server-authoritative state synced to clients.
+- **[Plugins](../plugins/)** — extend the framework with modular, sandboxed plugins.

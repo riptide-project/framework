@@ -19,6 +19,7 @@ export type StateDefinition = {
 	OnEnter: ((self: any, ...any) -> ())?,
 	OnUpdate: ((self: any, dt: number) -> ())?,
 	OnExit: ((self: any) -> ())?,
+	CanTransitionTo: ({ string } | (self: any, newStateName: string) -> boolean)?,
 	[string]: any,
 }
 
@@ -59,7 +60,10 @@ function StateMachine.new(config: StateMachineConfig): StateMachine
 
 	local initialStateDef = self._states[self._currentStateName]
 	if initialStateDef and type(initialStateDef.OnEnter) == "function" then
-		initialStateDef.OnEnter(initialStateDef)
+		local ok, err = xpcall(initialStateDef.OnEnter, debug.traceback, initialStateDef)
+		if not ok then
+			warn(string.format("[StateMachine] OnEnter error in initial state '%s':\n%s", self._currentStateName, tostring(err)))
+		end
 	end
 
 	return (self :: any) :: StateMachine
@@ -82,15 +86,46 @@ function StateMachine:TransitionTo(newStateName: string, ...: any)
 		return
 	end
 
+	if oldStateDef and oldStateDef.CanTransitionTo then
+		local allowed = false
+		local guardType = type(oldStateDef.CanTransitionTo)
+		if guardType == "function" then
+			allowed = oldStateDef.CanTransitionTo(oldStateDef, newStateName)
+		elseif guardType == "table" then
+			for _, stateName in ipairs(oldStateDef.CanTransitionTo) do
+				if stateName == newStateName then
+					allowed = true
+					break
+				end
+			end
+		end
+		if not allowed then
+			warn(
+				string.format(
+					"[StateMachine] Transition from '%s' to '%s' blocked by guard.",
+					self._currentStateName,
+					newStateName
+				)
+			)
+			return
+		end
+	end
+
 	if oldStateDef and type(oldStateDef.OnExit) == "function" then
-		oldStateDef.OnExit(oldStateDef)
+		local ok, err = xpcall(oldStateDef.OnExit, debug.traceback, oldStateDef)
+		if not ok then
+			warn(string.format("[StateMachine] OnExit error in state '%s':\n%s", self._currentStateName, tostring(err)))
+		end
 	end
 
 	local oldStateName = self._currentStateName
 	self._currentStateName = newStateName
 
 	if type(newStateDef.OnEnter) == "function" then
-		newStateDef.OnEnter(newStateDef, ...)
+		local ok, err = xpcall(newStateDef.OnEnter, debug.traceback, newStateDef, ...)
+		if not ok then
+			warn(string.format("[StateMachine] OnEnter error in state '%s':\n%s", newStateName, tostring(err)))
+		end
 	end
 
 	self.OnStateChanged:Fire(oldStateName, newStateName)
@@ -99,14 +134,20 @@ end
 function StateMachine:Update(dt: number)
 	local currentStateDef = self._states[self._currentStateName]
 	if currentStateDef and type(currentStateDef.OnUpdate) == "function" then
-		currentStateDef.OnUpdate(currentStateDef, dt)
+		local ok, err = xpcall(currentStateDef.OnUpdate, debug.traceback, currentStateDef, dt)
+		if not ok then
+			warn(string.format("[StateMachine] OnUpdate error in state '%s':\n%s", self._currentStateName, tostring(err)))
+		end
 	end
 end
 
 function StateMachine:Destroy()
 	local currentStateDef = self._states[self._currentStateName]
 	if currentStateDef and type(currentStateDef.OnExit) == "function" then
-		currentStateDef.OnExit(currentStateDef)
+		local ok, err = xpcall(currentStateDef.OnExit, debug.traceback, currentStateDef)
+		if not ok then
+			warn(string.format("[StateMachine] OnExit error during Destroy for state '%s':\n%s", self._currentStateName, tostring(err)))
+		end
 	end
 
 	self.OnStateChanged:Destroy()

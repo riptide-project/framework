@@ -2,10 +2,14 @@ name: Deploy Docs
 
 on:
   push:
-    branches: [main]
+    branches: [main, maelstrom]
     paths:
       - 'docs/**'
       - '.github/workflows/deploy-docs.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -34,6 +38,8 @@ jobs:
       - name: Build
         run: npm run build
         working-directory: docs
+        env:
+          MAELSTROM: ${{ github.ref_name == 'maelstrom' }}
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

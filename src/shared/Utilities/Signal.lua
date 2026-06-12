@@ -1,11 +1,23 @@
 --!strict
 -- Riptide/Utilities/Signal.lua
--- A fast, custom Signal implementation
+-- High-performance Signal implementation with zero-allocation hot paths.
+--
+-- DESIGN CONTRACT (v0.9.1):
+--   :Fire() executes all connected callbacks SYNCHRONOUSLY in the calling
+--   thread.  This eliminates per-connection task.spawn overhead in hot paths
+--   (e.g. 60 Hz Heartbeat loops).  The framework no longer isolates
+--   connections from each other via thread scheduling — the developer is
+--   responsible for not yielding inside a :Connect callback.
+--
+--   :Wait() remains safe: it yields the CALLER's thread and resumes it via
+--   task.spawn once the signal fires, which is the only allocation that
+--   occurs in that code-path.
 
 local task = task
 if not task then
 	task = require("@lune/task")
 end
+
 export type Connection = {
 	Connected: boolean,
 	Disconnect: (self: Connection) -> (),
@@ -60,11 +72,13 @@ function Connection:Disconnect()
 		end
 	end
 
-	-- Prevent memory leaks: clear references
+	-- Prevent memory leaks: clear all references on disconnect
 	self._signal = nil
 	self._fn = nil
 	self._next = nil
 end
+
+-- ---------------------------------------------------------------------------
 
 local Signal = {}
 Signal.__index = Signal
@@ -94,23 +108,40 @@ function Signal:Once(fn: (...any) -> ()): Connection
 	return connection
 end
 
+--[[
+	:Fire() — ZERO-ALLOCATION HOT PATH.
+
+	Iterates the linked list and calls each connected function directly in the
+	current thread.  No closures are created, no tasks are spawned.
+
+	⚠ Do NOT yield inside a :Connect callback.  If you need deferred/async
+	  execution, wrap the body of your callback in task.defer/task.spawn
+	  yourself, or use the Async module.
+]]
 function Signal:Fire(...: any)
 	local curr = self._head
 	while curr do
+		-- Read _next BEFORE calling _fn: the callback may Disconnect() `curr`,
+		-- which would nil out curr._next and cause the traversal to stop early.
 		local nextConn = curr._next
 		if curr.Connected and curr._fn then
-			-- Spawn prevents one yielding connection from blocking the rest
-			task.spawn(curr._fn, ...)
+			curr._fn(...)
 		end
 		curr = nextConn
 	end
 end
 
+--[[
+	:Wait() — yields the calling coroutine until the signal next fires.
+	The single task.spawn here is intentional: it resumes the suspended
+	thread from within the signal's synchronous Fire pass without blocking
+	the remaining connection callbacks.
+]]
 function Signal:Wait(): ...any
 	local thread = coroutine.running()
 	local connection: Connection
 
-	connection = self:Connect(function(...)
+	connection = self:Connect(function(...: any)
 		connection:Disconnect()
 		task.spawn(thread, ...)
 	end)
@@ -123,6 +154,7 @@ function Signal:DisconnectAll()
 	local curr = self._head
 	while curr do
 		local nextConn = curr._next
+		-- Resume any threads that are blocked in :Wait()
 		if curr._thread then
 			task.spawn(curr._thread)
 		end

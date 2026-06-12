@@ -18,6 +18,9 @@
       "$className": "ServerScriptService",
       "ServerTests": {
         "$path": "test/server"
+      },
+      "TestPlugins": {
+        "$path": "test/plugins"
       }
     },
     "StarterPlayer": {

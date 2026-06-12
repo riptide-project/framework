@@ -8,9 +8,13 @@ local ComponentServiceModule = require(script.shared.ComponentService)
 local ModuleLoader = require(script.shared.ModuleLoader)
 local NetworkModule = require(script.shared.Network)
 local PlayerLifecycleModule = require(script.shared.PlayerLifecycle)
+local PluginManagerModule = require(script.shared.PluginManager)
 local SignalModule = require(script.shared.Utilities.Signal)
 local StateMachineModule = require(script.shared.StateMachine)
 local StateReplicationModule = require(script.shared.StateReplication)
+local TroveModule = require(script.shared.Utilities.Trove)
+local EventBusModule = require(script.shared.Utilities.EventBus)
+local GuardModule = require(script.shared.Utilities.Guard)
 
 local IS_SERVER = RunService:IsServer()
 local REMOTE_WAIT_TIMEOUT = 10
@@ -26,7 +30,11 @@ export type RiptideServer = {
 	ComponentService: ComponentServiceModule.ComponentServiceAPI,
 	State: StateReplicationModule.StateReplicationAPI,
 	StateMachine: typeof(StateMachineModule),
-	PlayerLifecycle: any,
+	PlayerLifecycle: PlayerLifecycleModule.PlayerLifecycleAPI,
+	Plugins: PluginManagerModule.PluginManagerAPI,
+	Trove: typeof(TroveModule),
+	EventBus: typeof(EventBusModule),
+	Guard: typeof(GuardModule),
 	GetModule: (name: string) -> any,
 	GetService: (name: string) -> any,
 	Server: RiptideLaunch,
@@ -41,6 +49,10 @@ export type RiptideClient = {
 	ComponentService: ComponentServiceModule.ComponentServiceAPI,
 	State: StateReplicationModule.StateReplicationAPI,
 	StateMachine: typeof(StateMachineModule),
+	Plugins: PluginManagerModule.PluginManagerAPI,
+	Trove: typeof(TroveModule),
+	EventBus: typeof(EventBusModule),
+	Guard: typeof(GuardModule),
 	GetModule: (name: string) -> any,
 	GetController: (name: string) -> any,
 	Client: RiptideLaunch,
@@ -61,6 +73,9 @@ Riptide.ComponentService = ComponentServiceModule
 Riptide.State = StateReplicationModule
 Riptide.StateMachine = StateMachineModule
 Riptide.PlayerLifecycle = PlayerLifecycleModule
+Riptide.Trove = TroveModule
+Riptide.EventBus = EventBusModule
+Riptide.Guard = GuardModule
 
 function Riptide.GetModule(name: string): any
 	local module = Riptide._modules[name]
@@ -103,7 +118,6 @@ local Shared = script.shared
 local Remotes: Folder
 local EventDispatcher: RemoteEvent
 local UnreliableEventDispatcher: UnreliableRemoteEvent
-local FunctionDispatcher: RemoteFunction
 
 local function waitForChildOrError(parent: Instance, childName: string, timeoutSeconds: number): Instance
 	local child = parent:WaitForChild(childName, timeoutSeconds)
@@ -135,30 +149,23 @@ if IS_SERVER then
 		UnreliableEventDispatcher = Instance.new("UnreliableRemoteEvent")
 		UnreliableEventDispatcher.Name = "UnreliableEventDispatcher"
 		UnreliableEventDispatcher.Parent = Remotes
-
-		FunctionDispatcher = Instance.new("RemoteFunction")
-		FunctionDispatcher.Name = "FunctionDispatcher"
-		FunctionDispatcher.Parent = Remotes
 	else
 		Remotes = existingRemotes :: Folder
 		EventDispatcher = waitForChildOrError(Remotes, "EventDispatcher", REMOTE_WAIT_TIMEOUT) :: RemoteEvent
 		UnreliableEventDispatcher =
 			waitForChildOrError(Remotes, "UnreliableEventDispatcher", REMOTE_WAIT_TIMEOUT) :: UnreliableRemoteEvent
-		FunctionDispatcher = waitForChildOrError(Remotes, "FunctionDispatcher", REMOTE_WAIT_TIMEOUT) :: RemoteFunction
 	end
 else
 	Remotes = waitForChildOrError(Shared, "Remotes", REMOTE_WAIT_TIMEOUT) :: Folder
 	EventDispatcher = waitForChildOrError(Remotes, "EventDispatcher", REMOTE_WAIT_TIMEOUT) :: RemoteEvent
 	UnreliableEventDispatcher =
 		waitForChildOrError(Remotes, "UnreliableEventDispatcher", REMOTE_WAIT_TIMEOUT) :: UnreliableRemoteEvent
-	FunctionDispatcher = waitForChildOrError(Remotes, "FunctionDispatcher", REMOTE_WAIT_TIMEOUT) :: RemoteFunction
 end
 
 NetworkModule._init({
 	IsServer = IS_SERVER,
 	EventDispatcher = EventDispatcher,
 	UnreliableEventDispatcher = UnreliableEventDispatcher,
-	FunctionDispatcher = FunctionDispatcher,
 })
 
 StateReplicationModule:_init({
@@ -170,10 +177,27 @@ if IS_SERVER then
 	PlayerLifecycleModule:_init({
 		Players = Players,
 		StateReplication = StateReplicationModule,
+		OnPlayerAdded = function(player)
+			PluginManagerModule:NotifyPlayerAdded(player)
+		end,
+		OnPlayerRemoving = function(player)
+			PluginManagerModule:NotifyPlayerRemoving(player)
+		end,
 	})
 end
 
+-- Initialize PluginManager with all core dependencies
+PluginManagerModule:_init({
+	Network = NetworkModule,
+	State = StateReplicationModule,
+	Signal = SignalModule,
+	ComponentService = ComponentServiceModule,
+	IsServer = IS_SERVER,
+	Async = AsyncModule,
+})
+
 Riptide.Network = NetworkModule
+Riptide.Plugins = PluginManagerModule
 
 -- Wire up side-specific initializers and lookup guards
 local function launch(sideName: "Server" | "Client", config: ModuleLoader.Config)

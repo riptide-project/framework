@@ -5,12 +5,16 @@
 export type PlayerLifecycleDeps = {
 	Players: any,
 	StateReplication: any?,
+	OnPlayerAdded: ((player: any) -> ())?,
+	OnPlayerRemoving: ((player: any) -> ())?,
 }
 
 local PlayerLifecycle = {}
 
 PlayerLifecycle._players = nil :: any
 PlayerLifecycle._stateReplication = nil :: any
+PlayerLifecycle._onPlayerAdded = nil :: any
+PlayerLifecycle._onPlayerRemoving = nil :: any
 PlayerLifecycle._started = false
 PlayerLifecycle._connections = {} :: { any }
 
@@ -39,6 +43,8 @@ local function resetState(self: any)
 	disconnectAll(self)
 	self._players = nil
 	self._stateReplication = nil
+	self._onPlayerAdded = nil
+	self._onPlayerRemoving = nil
 	self._started = false
 end
 
@@ -50,6 +56,8 @@ function PlayerLifecycle:_init(deps: PlayerLifecycleDeps)
 	resetState(self)
 	self._players = deps.Players
 	self._stateReplication = deps.StateReplication
+	self._onPlayerAdded = deps.OnPlayerAdded
+	self._onPlayerRemoving = deps.OnPlayerRemoving
 end
 
 function PlayerLifecycle:Start(modules: { { name: string, module: any } }, riptideRef: any)
@@ -64,12 +72,18 @@ function PlayerLifecycle:Start(modules: { { name: string, module: any } }, ripti
 
 	for _, player in ipairs(self._players:GetPlayers()) do
 		callHook(modules, "OnPlayerAdded", riptideRef, player)
+		if self._onPlayerAdded then
+			self._onPlayerAdded(player)
+		end
 	end
 
 	table.insert(
 		self._connections,
 		self._players.PlayerAdded:Connect(function(player: any)
 			callHook(modules, "OnPlayerAdded", riptideRef, player)
+			if self._onPlayerAdded then
+				self._onPlayerAdded(player)
+			end
 		end)
 	)
 
@@ -80,8 +94,16 @@ function PlayerLifecycle:Start(modules: { { name: string, module: any } }, ripti
 			if self._stateReplication and type(self._stateReplication._onPlayerRemoving) == "function" then
 				self._stateReplication:_onPlayerRemoving(player)
 			end
+			if self._onPlayerRemoving then
+				self._onPlayerRemoving(player)
+			end
 		end)
 	)
 end
 
-return PlayerLifecycle
+export type PlayerLifecycleAPI = {
+	_init: (self: any, deps: PlayerLifecycleDeps) -> (),
+	Start: (self: any, modules: { { name: string, module: any } }, riptideRef: any) -> (),
+}
+
+return PlayerLifecycle :: PlayerLifecycleAPI

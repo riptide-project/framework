@@ -164,14 +164,16 @@ end)
 State:RequestSync() -> boolean
 ```
 
-Manually requests a full state snapshot from the server. This is called **automatically** during initialization, but you can call it manually to force a re-sync.
+Manually requests a full state snapshot from the server. Called **automatically** on init, but can be invoked manually to force a re-sync.
 
-Returns `true` on success, `false` on failure (e.g., server unreachable or called on server).
+The request is **asynchronous** — it fires an event to the server and applies the snapshot when the server responds. Deltas that arrive during the round-trip are buffered and replayed after the snapshot is applied.
+
+Returns `true` if the request was dispatched, `false` if Network is unavailable, called on server, or a request is already in flight.
 
 ```lua
-local ok = Riptide.State:RequestSync()
-if ok then
-    print("State re-synced!")
+local sent = Riptide.State:RequestSync()
+if sent then
+    print("Snapshot re-sync requested.")
 end
 ```
 
@@ -180,24 +182,32 @@ end
 ## Sync Protocol
 
 ```
-Client connects → InvokeServer("__riptide_state_snapshot")
-Server responds with:
-  {
-    global = { ... },
-    globalVersions = { ... },
-    player = { ... },
-    playerVersions = { ... },
-  }
+Client connects
+  → FireServer("__riptide_state_snapshot")     [request]
 
-After initial sync, deltas arrive via:
-  FireClient(player, "__riptide_state_delta", {
-    scope = "global" | "player",
-    key = "...",
-    value = ...,
-    version = number,
-  })
+Server responds
+  → FireClient(player, "__riptide_state_snapshot", {
+      global         = { ... },
+      globalVersions = { ... },
+      player         = { ... },
+      playerVersions = { ... },
+    })
+
+After initial sync, deltas arrive as flat args:
+  → FireAllClients("__riptide_state_delta", scope, key, value, version)
+  → FireClient(player, "__riptide_state_delta", scope, key, value, version)
+
+  scope   = "global" | "player"
+  key     = string
+  value   = any
+  version = number (monotonically increasing per key per scope)
 ```
 
 - Each key has a monotonically increasing **version** per scope.
 - The client discards deltas with a version ≤ the current known version (idempotent).
+- Deltas received during the snapshot round-trip are buffered and replayed in order after the snapshot is applied.
 - On player leave, the server automatically cleans up all player-scoped state via `PlayerLifecycle`.
+
+:::note
+Subscribers registered via `Subscribe()` are notified **synchronously** when a delta or snapshot changes a key's resolved value. Callbacks must not yield — use `task.defer` internally if deferred execution is needed.
+:::

@@ -1,15 +1,38 @@
-# Project place file
-/Riptide Framework.rbxlx
+# Roblox Studio place files & lock files
+*.rbxl
+*.rbxlx
+*.rbxl.lock
+*.rbxlx.lock
+*.lock-db
 
-# Roblox Studio lock files
-/*.rbxlx.lock
-/*.rbxl.lock
+# Packages & Dependency Managers
+/Packages/
+/DevPackages/
+/luau_packages/
+/.pesde/
+/node_modules/
 
-# Generated files
+# Generated files / build outputs
 sourcemap.json
+/build/
+/dist/
+/out/
+*.rbxm
+*.rbxmx
 
-# Package managers
-Packages/
-DevPackages/
-luau_packages/
-.pesde/
+# IDE & Tool configurations
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+.idea/
+.astro/
+*.log*
+.eslintcache
+.stylelintcache
+
+# Lune runtimes/cache
+.lune/.runtime-cache/
+
+# OS/System files
+.DS_Store
+Thumbs.db

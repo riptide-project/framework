@@ -20,6 +20,8 @@ if isRoblox then
 		ComponentService = require(SharedFolder:WaitForChild("ComponentService")),
 		ModuleLoader = require(SharedFolder:WaitForChild("ModuleLoader")),
 		PlayerLifecycle = require(SharedFolder:WaitForChild("PlayerLifecycle")),
+		PluginManager = require(SharedFolder:WaitForChild("PluginManager")),
+		PluginSandbox = require(SharedFolder:WaitForChild("PluginSandbox")),
 		Signal = require(UtilitiesFolder:WaitForChild("Signal")),
 		Async = require(UtilitiesFolder:WaitForChild("Async")),
 	}
@@ -43,6 +45,8 @@ else
 		ComponentService = require("../../src/shared/ComponentService"),
 		ModuleLoader = require("../../src/shared/ModuleLoader"),
 		PlayerLifecycle = require("../../src/shared/PlayerLifecycle"),
+		PluginManager = require("../../src/shared/PluginManager"),
+		PluginSandbox = require("../../src/shared/PluginSandbox"),
 		Signal = require("../../src/shared/Utilities/Signal"),
 		Async = require("../../src/shared/Utilities/Async"),
 	}

@@ -10,7 +10,7 @@ local check = frktest.assert.check
 
 local Network = Env.RiptideShared.Network
 local MockRemoteEvent = Env.Mocks.MockRemoteEvent
-local MockRemoteFunction = Env.Mocks.MockRemoteFunction
+local _MockRemoteFunction = Env.Mocks.MockRemoteFunction -- kept for potential future use; not injected into Network
 local ComponentService = Env.RiptideShared.ComponentService
 local Async = Env.RiptideShared.Async
 local Signal = Env.RiptideShared.Signal
@@ -20,13 +20,11 @@ return function()
 	test.suite("Chaos Scenarios", function()
 		test.case("Network Flood: 10,000 requests in one frame", function()
 			local mockEvent = MockRemoteEvent.new()
-			local mockFunction = MockRemoteFunction.new()
 
 			Network._init({
 				IsServer = true,
 				EventDispatcher = mockEvent,
 				UnreliableEventDispatcher = mockEvent,
-				FunctionDispatcher = mockFunction,
 			})
 
 			local count = 0
