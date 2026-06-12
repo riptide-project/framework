@@ -32,14 +32,14 @@ jobs:
           cache-dependency-path: 'docs/package-lock.json'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
         working-directory: docs
 
       - name: Build
         run: npm run build
         working-directory: docs
         env:
-          MAELSTROM: ${{ github.ref_name == 'maelstrom' }}
+          MAELSTROM: "${{ github.ref_name == 'maelstrom' }}"
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
