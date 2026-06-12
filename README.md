@@ -8,7 +8,7 @@
 <a href="https://riptide-project.github.io/framework"><img src="https://raw.githubusercontent.com/maneetoo/Roblox-OSS-Badges/refs/heads/main/Badges/png/32px/link-documentation.png" alt="Documentation" height="28"></a>
 <a href="https://github.com/riptide-project/framework/releases"><img src="https://raw.githubusercontent.com/maneetoo/Roblox-OSS-Badges/refs/heads/main/Badges/png/32px/link-github-releases.png" alt="GitHub Releases" height="28"></a>
 <a href="CHANGELOG.md"><img src="https://raw.githubusercontent.com/maneetoo/Roblox-OSS-Badges/refs/heads/main/Badges/png/32px/link-changelog.png" alt="Changelog" height="28"></a>
-<a href="https://github.com/pesde-pkg"><img src="https://raw.githubusercontent.com/maneetoo/Roblox-OSS-Badges/refs/heads/main/Badges/png/32px/link-pesde.png" alt="Pesde Package" height="28"></a>
+<a href="https://pesde.dev/packages/riptide/core"><img src="https://raw.githubusercontent.com/maneetoo/Roblox-OSS-Badges/refs/heads/main/Badges/png/32px/link-pesde.png" alt="Pesde Package" height="28"></a>
 <a href="https://wally.run/package/riptide/core"><img src="https://raw.githubusercontent.com/maneetoo/Roblox-OSS-Badges/refs/heads/main/Badges/png/32px/link-wally.png" alt="Wally Package" height="28"></a>
 <a href="https://github.com/riptide-project/framework/actions"><img src="https://raw.githubusercontent.com/maneetoo/Roblox-OSS-Badges/refs/heads/main/Badges/png/32px/link-tests.png" alt="Tests" height="28"></a>
 
