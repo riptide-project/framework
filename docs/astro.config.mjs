@@ -10,9 +10,6 @@ export default defineConfig({
 	integrations: [
 		starlight({
 			title: 'Riptide Framework',
-			banner: process.env.MAELSTROM === 'true' ? {
-				content: '🌊 You are viewing documentation for the <b>Maelstrom</b> pre-release channel. Pin a <a href="https://github.com/riptide-project/framework/releases">stable release</a> for production.',
-			} : undefined,
 			logo: {
 				src: './src/assets/logo.png',
 			},
