@@ -5,7 +5,7 @@ license = "MIT"
 authors = ["Riptide Development Group"]
 repository = "https://github.com/riptide-project/framework"
 
-includes = ["pesde.toml", "README.md", "LICENSE", "src/**", "assets/**"]
+includes = ["pesde.toml", "README.md", "LICENSE", "src/**"]
 
 [target]
 environment = "roblox"
