@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/riptide_banner_v4.png" alt="Riptide Banner" width="100%">
+<img src="https://github.com/riptide-project/framework/raw/maelstrom/assets/riptide_banner_v4.png" alt="Riptide Banner" width="100%">
 
 <br/>
 
