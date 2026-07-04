@@ -33,10 +33,12 @@ return function()
 			check.not_nil(api.FireAllClients)
 			check.not_nil(api.UnreliableFireClient)
 			check.not_nil(api.UnreliableFireAllClients)
+			check.not_nil(api.TypedServer)
 			-- Removed APIs must be nil
 			check.equal(api.InvokeClient, nil)
 			check.equal(api.FireServer, nil)
 			check.equal(api.UnreliableFireServer, nil)
+			check.equal(api.TypedClient, nil)
 		end)
 
 		test.case("should register and unregister handlers", function()
@@ -99,6 +101,25 @@ return function()
 
 			check.equal(#mockEvent._firedClient, 1)
 			check.equal(mockEvent._firedClient[1].player, "Player1")
+		end)
+
+		test.case("should expose typed server proxy event fields", function()
+			local mockEvent = MockRemoteEvent.new()
+
+			Network._init({
+				IsServer = true,
+				EventDispatcher = mockEvent,
+				UnreliableEventDispatcher = mockEvent,
+			})
+
+			local typedNetwork = (Network :: any).TypedServer()
+			typedNetwork.RewardPlayer("Player1" :: any, 100, "Quest")
+
+			check.equal(#mockEvent._firedClient, 1)
+			check.equal(mockEvent._firedClient[1].player, "Player1")
+			check.equal(mockEvent._firedClient[1].args[1], "RewardPlayer")
+			check.equal(mockEvent._firedClient[1].args[2], 100)
+			check.equal(mockEvent._firedClient[1].args[3], "Quest")
 		end)
 
 		test.case("should clean up empty handler entries after unregister", function()
@@ -253,6 +274,148 @@ return function()
 			task.wait()
 			check.equal(calledCount, 1)
 		end)
+
+		test.case("should unregister typed callbacks per event name", function()
+			local mockEvent = MockRemoteEvent.new()
+
+			Network._init({
+				IsServer = true,
+				EventDispatcher = mockEvent,
+				UnreliableEventDispatcher = mockEvent,
+			})
+
+			local function isNumber(val)
+				return type(val) == "number", "Expected number"
+			end
+
+			local function isString(val)
+				return type(val) == "string", "Expected string"
+			end
+
+			local calledCount = 0
+			local function callback(_player, _value)
+				calledCount += 1
+			end
+
+			Network.RegisterTyped("TypedNumberEvent", { isNumber }, callback)
+			Network.RegisterTyped("TypedStringEvent", { isString }, callback)
+
+			mockEvent.OnServerEvent:Fire("Player1", "TypedNumberEvent", 10)
+			mockEvent.OnServerEvent:Fire("Player1", "TypedStringEvent", "ok")
+			task.wait()
+			check.equal(calledCount, 2)
+
+			Network.Unregister("TypedNumberEvent", callback)
+
+			mockEvent.OnServerEvent:Fire("Player1", "TypedNumberEvent", 20)
+			mockEvent.OnServerEvent:Fire("Player1", "TypedStringEvent", "still registered")
+			task.wait()
+			check.equal(calledCount, 3)
+
+			Network.Unregister("TypedStringEvent", callback)
+			mockEvent.OnServerEvent:Fire("Player1", "TypedStringEvent", "removed")
+			task.wait()
+			check.equal(calledCount, 3)
+		end)
+
+		test.case("should ignore non-string server event names", function()
+			local mockEvent = MockRemoteEvent.new()
+
+			Network._init({
+				IsServer = true,
+				EventDispatcher = mockEvent,
+				UnreliableEventDispatcher = mockEvent,
+			})
+
+			local called = false
+			(Network :: any).Register(123, function()
+				called = true
+			end)
+
+			mockEvent.OnServerEvent:Fire("Player1", 123, "payload")
+			task.wait()
+
+			check.equal(called, false)
+		end)
+
+		test.case("should dispatch unreliable server events", function()
+			local reliableEvent = MockRemoteEvent.new()
+			local unreliableEvent = MockRemoteEvent.new()
+
+			Network._init({
+				IsServer = true,
+				EventDispatcher = reliableEvent,
+				UnreliableEventDispatcher = unreliableEvent,
+			})
+
+			local received = nil
+			Network.Register("UnreliableServerEvent", function(_player, value)
+				received = value
+			end)
+
+			unreliableEvent.OnServerEvent:Fire("Player1", "UnreliableServerEvent", "fast")
+			task.wait()
+
+			check.equal(received, "fast")
+		end)
+
+		test.case("should validate typed unreliable server events", function()
+			local reliableEvent = MockRemoteEvent.new()
+			local unreliableEvent = MockRemoteEvent.new()
+
+			Network._init({
+				IsServer = true,
+				EventDispatcher = reliableEvent,
+				UnreliableEventDispatcher = unreliableEvent,
+			})
+
+			local function isNumber(val)
+				return type(val) == "number", "Expected number"
+			end
+
+			local calledCount = 0
+			Network.RegisterTypedUnreliable("TypedUnreliableServerEvent", { isNumber }, function(_player, _value)
+				calledCount += 1
+			end)
+
+			unreliableEvent.OnServerEvent:Fire("Player1", "TypedUnreliableServerEvent", 1)
+			unreliableEvent.OnServerEvent:Fire("Player1", "TypedUnreliableServerEvent", "bad")
+			task.wait()
+
+			check.equal(calledCount, 1)
+		end)
+
+		test.case("should clear only selected middleware scope", function()
+			local mockEvent = MockRemoteEvent.new()
+
+			Network._init({
+				IsServer = true,
+				EventDispatcher = mockEvent,
+				UnreliableEventDispatcher = mockEvent,
+			})
+
+			Network.UseMiddleware("server", function()
+				return false
+			end)
+			Network.UseMiddleware("client", function()
+				return false
+			end)
+			Network.ClearMiddlewares("client")
+
+			local callCount = 0
+			Network.Register("ClearMiddlewareScopeEvent", function()
+				callCount += 1
+			end)
+
+			mockEvent.OnServerEvent:Fire("Player1", "ClearMiddlewareScopeEvent")
+			task.wait()
+			check.equal(callCount, 0)
+
+			Network.ClearMiddlewares("server")
+			mockEvent.OnServerEvent:Fire("Player1", "ClearMiddlewareScopeEvent")
+			task.wait()
+			check.equal(callCount, 1)
+		end)
 	end)
 
 	test.suite("Network (Client Mode)", function()
@@ -268,6 +431,7 @@ return function()
 			local api = Network :: any
 			check.not_nil(api.FireServer)
 			check.not_nil(api.UnreliableFireServer)
+			check.not_nil(api.TypedClient)
 			-- Removed APIs must be nil
 			check.equal(api.InvokeServer, nil)
 			-- Server-only methods must not exist on client
@@ -275,6 +439,7 @@ return function()
 			check.equal(api.FireAllClients, nil)
 			check.equal(api.UnreliableFireClient, nil)
 			check.equal(api.UnreliableFireAllClients, nil)
+			check.equal(api.TypedServer, nil)
 		end)
 
 		test.case("should dispatch events from server to client handler", function()
@@ -311,6 +476,24 @@ return function()
 			api.FireServer("JumpEvent", 42)
 
 			check.equal(#mockEvent._firedServer, 1)
+		end)
+
+		test.case("should expose typed client proxy event fields", function()
+			local mockEvent = MockRemoteEvent.new()
+
+			Network._init({
+				IsServer = false,
+				EventDispatcher = mockEvent,
+				UnreliableEventDispatcher = mockEvent,
+			})
+
+			local typedNetwork = (Network :: any).TypedClient()
+			typedNetwork.PurchaseItem("sword", 2)
+
+			check.equal(#mockEvent._firedServer, 1)
+			check.equal(mockEvent._firedServer[1][1], "PurchaseItem")
+			check.equal(mockEvent._firedServer[1][2], "sword")
+			check.equal(mockEvent._firedServer[1][3], 2)
 		end)
 
 		test.case("should apply client middleware to incoming events", function()
@@ -375,6 +558,47 @@ return function()
 			mockEvent.OnClientEvent:Fire("ClientTypedEvent", "not a number")
 			task.wait()
 			check.equal(calledCount, 1)
+		end)
+
+		test.case("should ignore non-string client event names", function()
+			local mockEvent = MockRemoteEvent.new()
+
+			Network._init({
+				IsServer = false,
+				EventDispatcher = mockEvent,
+				UnreliableEventDispatcher = mockEvent,
+			})
+
+			local called = false
+			(Network :: any).Register(123, function()
+				called = true
+			end)
+
+			mockEvent.OnClientEvent:Fire(123, "payload")
+			task.wait()
+
+			check.equal(called, false)
+		end)
+
+		test.case("should dispatch unreliable client events", function()
+			local reliableEvent = MockRemoteEvent.new()
+			local unreliableEvent = MockRemoteEvent.new()
+
+			Network._init({
+				IsServer = false,
+				EventDispatcher = reliableEvent,
+				UnreliableEventDispatcher = unreliableEvent,
+			})
+
+			local received = nil
+			Network.Register("UnreliableClientEvent", function(value)
+				received = value
+			end)
+
+			unreliableEvent.OnClientEvent:Fire("UnreliableClientEvent", "fast")
+			task.wait()
+
+			check.equal(received, "fast")
 		end)
 	end)
 end

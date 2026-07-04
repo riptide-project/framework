@@ -20,13 +20,19 @@ are require()d    run in sequence,   run in parallel
 first.            synchronously.     (task.spawn).
 ```
 
+### Framework Extension Phase — Plugins
+
+Before game modules load, Riptide loads and initializes configured plugins. Plugins are treated as framework extensions: they can expose `PublicAPI`, register sandbox-owned resources, and prepare infrastructure that services/controllers consume later.
+
+Plugin `Start` runs as a bounded readiness barrier after game module `Init`, but before server player lifecycle replay and game module `Start`. A plugin can yield in `Start`, but it should only do bounded setup there; long-running loops should be spawned inside `Start`.
+
 ### Phase 1 — Load
 
 Riptide `require()`s every Lua module it finds in the folders you passed to `Launch`. No lifecycle methods are called yet — this is pure module loading. Every return value is stored internally by its module name.
 
 ### Phase 2 — Init
 
-Riptide calls `:Init(Riptide)` on every module that defines it, **one at a time**, in load order. Because they run in sequence, you can safely call `Riptide.GetService()` / `Riptide.GetController()` to access other modules — they are already loaded, even if their own `Init` hasn't run yet.
+Riptide calls `:Init(Riptide)` on every module that defines it, **one at a time**, in load order. The injected `Riptide` argument is already side-specific: server services receive `Riptide.Server`, and client controllers receive `Riptide.Client`. Because `Init` runs in sequence, you can safely call `Riptide.GetService()` or `Riptide.GetController()` to access other modules — they are already loaded, even if their own `Init` hasn't run yet.
 
 :::caution[Do not yield in Init]
 `Init` runs synchronously. **Never** call `task.wait`, `Instance:WaitForChild`, `RemoteEvent.OnServerEvent:Wait()`, or any other yielding call inside `Init`. Yielding here blocks all other modules from initializing and will likely deadlock your game.
@@ -59,7 +65,7 @@ Two additional lifecycle methods are automatically called for you:
 
 | Method | When |
 |---|---|
-| `:OnPlayerAdded(Riptide, player)` | A player joins. Also fires **retroactively** for any players already in the server when Riptide boots. |
+| `:OnPlayerAdded(Riptide, player)` | A player joins. Also replays for existing players after plugin readiness and module initialization. |
 | `:OnPlayerRemoving(Riptide, player)` | A player leaves. |
 
 ---
@@ -80,7 +86,7 @@ function DataService:Init(Riptide)
 
     -- ✅ Safe: register network handlers.
     Riptide.Network.Register("GetCoins", function(player)
-        return Riptide.State:GetForPlayer(player, "coins")
+        return Riptide.State:Get("coins", player)
     end)
 
     -- ❌ WRONG: never yield in Init.

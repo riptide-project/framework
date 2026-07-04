@@ -26,31 +26,19 @@ local check = frktest.assert.check
 local isRoblox = typeof(game) ~= "nil"
 
 local PluginManager: any
-local PluginSandbox: any
 local Signal: any
-local Network: any
-local MockRemoteEvent: any
-local MockRemoteFunction: any
 local Async: any
 
 if isRoblox then
 	local RS = game:GetService("ReplicatedStorage")
 	local SharedFolder = RS:WaitForChild("Riptide"):WaitForChild("shared")
 	PluginManager = require(SharedFolder:WaitForChild("PluginManager"))
-	PluginSandbox = require(SharedFolder:WaitForChild("PluginSandbox"))
 	Signal = require(SharedFolder:WaitForChild("Utilities"):WaitForChild("Signal"))
-	Network = require(SharedFolder:WaitForChild("Network"))
 	Async = require(SharedFolder:WaitForChild("Utilities"):WaitForChild("Async"))
-	MockRemoteEvent = Env.Mocks.MockRemoteEvent
-	MockRemoteFunction = Env.Mocks.MockRemoteFunction
 else
 	PluginManager = require("../../src/shared/PluginManager")
-	PluginSandbox = require("../../src/shared/PluginSandbox")
 	Signal = require("../../src/shared/Utilities/Signal")
-	Network = require("../../src/shared/Network")
 	Async = require("../../src/shared/Utilities/Async")
-	MockRemoteEvent = require("./mocks/MockRemoteEvent")
-	MockRemoteFunction = require("./mocks/MockRemoteFunction")
 end
 
 -- ---------------------------------------------------------------------------
@@ -69,7 +57,9 @@ local function makeMockNetwork()
 		end,
 		Unregister = function(name: string, cb: (...any) -> any)
 			local list = handlers[name]
-			if not list then return end
+			if not list then
+				return
+			end
 			for i = #list, 1, -1 do
 				if list[i] == cb then
 					table.remove(list, i)
@@ -111,7 +101,7 @@ local function makeMockComponentService()
 		UnregisterTag = function(_self: any, tag: string)
 			table.insert(unregistered, tag)
 		end,
-		_registerTagManually = nil,  -- not exposed by default
+		_registerTagManually = nil, -- not exposed by default
 		_unregistered = unregistered,
 	}
 end
@@ -181,10 +171,53 @@ return function()
 			check.equal(mgr:GetStatus("LCTest"), "Initializing")
 
 			mgr:StartPlugins()
-			-- Wait one frame for task.spawn to complete
-			task.wait()
 			check.equal(log[2], "Start")
 			check.equal(mgr:GetStatus("LCTest"), "Running")
+		end)
+
+		test.case("StartPlugins waits for yielding Start before returning", function()
+			local mgr = buildManager()
+			local started = false
+
+			local plugin = makePlugin("YieldingStarter", "Server", {
+				Init = function(_self, _sandbox) end,
+				Start = function(_self, _sandbox)
+					task.wait()
+					started = true
+				end,
+			})
+
+			mgr:LoadPlugins(nil, { plugin })
+			mgr:InitPlugins()
+			mgr:StartPlugins()
+
+			check.equal(started, true)
+			check.equal(mgr:GetStatus("YieldingStarter"), "Running")
+		end)
+
+		test.case("plugin receives players recorded before Start completes", function()
+			local mgr = buildManager()
+			local player = { Name = "ExistingPlayer", UserId = 1001 } :: any
+			local seen = 0
+
+			local plugin = makePlugin("PlayerReplay", "Server", {
+				Init = function(_self, _sandbox) end,
+				Start = function(_self, _sandbox) end,
+				OnPlayerAdded = function(_self, _sandbox, joinedPlayer)
+					if joinedPlayer == player then
+						seen += 1
+					end
+				end,
+			})
+
+			mgr:LoadPlugins(nil, { plugin })
+			mgr:InitPlugins()
+			mgr:NotifyPlayerAdded(player)
+			mgr:StartPlugins()
+			task.wait()
+			task.wait()
+
+			check.equal(seen, 1)
 		end)
 
 		test.case("sandbox.PluginName equals Descriptor.Name", function()
@@ -201,6 +234,23 @@ return function()
 			mgr:LoadPlugins(nil, { plugin })
 			mgr:InitPlugins()
 			check.equal(capturedName, "NameCheck")
+		end)
+
+		test.case("normal plugin sandbox does not expose OnCoreEvent", function()
+			local mgr = buildManager()
+			local exposedType = "unset"
+
+			local plugin = makePlugin("SandboxPermissions", "Server", {
+				Init = function(_self, sandbox)
+					exposedType = type(sandbox.OnCoreEvent)
+				end,
+				Start = function(_self, _sandbox) end,
+			})
+
+			mgr:LoadPlugins(nil, { plugin })
+			mgr:InitPlugins()
+
+			check.equal(exposedType, "nil")
 		end)
 
 		test.case("OnRegister is called before Init", function()
@@ -308,6 +358,29 @@ return function()
 			end
 			check.equal(count, 0)
 		end)
+
+		test.case("plugin that crashes in OnPlayerAdded is marked Errored", function()
+			local mgr = buildManager()
+			local player = { Name = "HookCrashPlayer", UserId = 1002 } :: any
+
+			local plugin = makePlugin("PlayerHookCrasher", "Server", {
+				Init = function(_self, _sandbox) end,
+				Start = function(_self, _sandbox) end,
+				OnPlayerAdded = function(_self, _sandbox, _player)
+					error("intentional crash in OnPlayerAdded")
+				end,
+			})
+
+			mgr:LoadPlugins(nil, { plugin })
+			mgr:InitPlugins()
+			mgr:StartPlugins()
+			task.wait()
+
+			mgr:NotifyPlayerAdded(player)
+			task.wait()
+
+			check.equal(mgr:GetStatus("PlayerHookCrasher"), "Errored")
+		end)
 	end)
 
 	-- ---------------------------------------------------------------------------
@@ -346,6 +419,20 @@ return function()
 			mgr:LoadPlugins(nil, { bad })
 			-- Should not be registered at all
 			check.equal(mgr:GetStatus("Bad"), nil)
+		end)
+
+		test.case("invalid StartTimeout rejects plugin", function()
+			local mgr = buildManager()
+
+			local plugin = makePlugin("BadStartTimeout", "Server", {
+				Init = function(_self, _sandbox) end,
+				Start = function(_self, _sandbox) end,
+			})
+			plugin.Descriptor.StartTimeout = 0
+
+			mgr:LoadPlugins(nil, { plugin })
+
+			check.equal(mgr:GetStatus("BadStartTimeout"), nil)
 		end)
 
 		test.case("client-side plugin is silently skipped on server (IsServer=true)", function()
@@ -394,7 +481,7 @@ return function()
 					table.insert(initOrder, "DepB")
 				end,
 				Start = function(_self, _sandbox) end,
-			}, { "DepA" })  -- DepB depends on DepA
+			}, { "DepA" }) -- DepB depends on DepA
 
 			-- Note: LoadPlugins order doesn't matter — topo sort handles it
 			mgr:LoadPlugins(nil, { pluginB, pluginA })
@@ -402,6 +489,33 @@ return function()
 
 			check.equal(initOrder[1], "DepA")
 			check.equal(initOrder[2], "DepB")
+		end)
+
+		test.case("B depends on A → A.Start readiness completes before B.Start", function()
+			local mgr = buildManager()
+			local startOrder: { string } = {}
+
+			local pluginA = makePlugin("StartDepA", "Server", {
+				Init = function(_self, _sandbox) end,
+				Start = function(_self, _sandbox)
+					task.wait()
+					table.insert(startOrder, "StartDepA")
+				end,
+			})
+
+			local pluginB = makePlugin("StartDepB", "Server", {
+				Init = function(_self, _sandbox) end,
+				Start = function(_self, _sandbox)
+					table.insert(startOrder, "StartDepB")
+				end,
+			}, { "StartDepA" })
+
+			mgr:LoadPlugins(nil, { pluginB, pluginA })
+			mgr:InitPlugins()
+			mgr:StartPlugins()
+
+			check.equal(startOrder[1], "StartDepA")
+			check.equal(startOrder[2], "StartDepB")
 		end)
 
 		test.case("B can read A's PublicAPI during Init (dependency guaranteed initialized)", function()
@@ -413,7 +527,9 @@ return function()
 				Start = function(_self, _sandbox) end,
 			})
 			pluginA.Descriptor.PublicAPI = {
-				GetValue = function(): string return "hello_from_A" end,
+				GetValue = function(): string
+					return "hello_from_A"
+				end,
 			}
 
 			local pluginB = makePlugin("ApiConsumer", "Server", {
@@ -430,6 +546,50 @@ return function()
 			mgr:InitPlugins()
 
 			check.equal(apiValue, "hello_from_A")
+		end)
+
+		test.case("missing required dependency blocks plugin", function()
+			local mgr = buildManager()
+			local initCalled = false
+
+			local plugin = makePlugin("NeedsMissing", "Server", {
+				Init = function(_self, _sandbox)
+					initCalled = true
+				end,
+				Start = function(_self, _sandbox) end,
+			}, { "MissingProvider" })
+
+			mgr:LoadPlugins(nil, { plugin })
+			mgr:InitPlugins()
+
+			check.equal(mgr:GetStatus("NeedsMissing"), "Errored")
+			check.equal(initCalled, false)
+		end)
+
+		test.case("dependency blocked by missing dependency blocks dependents", function()
+			local mgr = buildManager()
+			local initOrder: { string } = {}
+
+			local blockedProvider = makePlugin("BlockedProvider", "Server", {
+				Init = function(_self, _sandbox)
+					table.insert(initOrder, "BlockedProvider")
+				end,
+				Start = function(_self, _sandbox) end,
+			}, { "MissingProvider" })
+
+			local dependent = makePlugin("DependentOnBlocked", "Server", {
+				Init = function(_self, _sandbox)
+					table.insert(initOrder, "DependentOnBlocked")
+				end,
+				Start = function(_self, _sandbox) end,
+			}, { "BlockedProvider" })
+
+			mgr:LoadPlugins(nil, { blockedProvider, dependent })
+			mgr:InitPlugins()
+
+			check.equal(mgr:GetStatus("BlockedProvider"), "Errored")
+			check.equal(mgr:GetStatus("DependentOnBlocked"), "Errored")
+			check.equal(#initOrder, 0)
 		end)
 	end)
 
@@ -559,6 +719,36 @@ return function()
 
 			check.equal(goodListenerFired, true)
 		end)
+
+		test.case("sandbox:Once receives only first plugin bus emission", function()
+			local mgr = buildManager()
+			local count = 0
+
+			local emitter = makePlugin("OnceEmitter", "Server", {
+				Init = function(_self, _sandbox) end,
+				Start = function(_self, sandbox)
+					sandbox:Emit("once:test")
+					sandbox:Emit("once:test")
+				end,
+			})
+
+			local subscriber = makePlugin("OnceSub", "Server", {
+				OnRegister = function(_self, sandbox)
+					sandbox:Once("once:test", function()
+						count += 1
+					end)
+				end,
+				Init = function(_self, _sandbox) end,
+				Start = function(_self, _sandbox) end,
+			})
+
+			mgr:LoadPlugins(nil, { subscriber, emitter })
+			mgr:InitPlugins()
+			mgr:StartPlugins()
+			task.wait()
+
+			check.equal(count, 1)
+		end)
 	end)
 
 	-- ---------------------------------------------------------------------------
@@ -584,7 +774,7 @@ return function()
 				Stop = function(_self, _sandbox)
 					table.insert(stopOrder, "StopB")
 				end,
-			}, { "StopA" })  -- B loads after A (A is B's dependency)
+			}, { "StopA" }) -- B loads after A (A is B's dependency)
 
 			mgr:LoadPlugins(nil, { pluginA, pluginB })
 			mgr:InitPlugins()
@@ -597,6 +787,34 @@ return function()
 			-- so Stop should visit B first, then A.
 			check.equal(stopOrder[1], "StopB")
 			check.equal(stopOrder[2], "StopA")
+		end)
+
+		test.case("StartPlugins times out slow Start and continues to later plugins", function()
+			local mgr = buildManager()
+			local nextStarted = false
+
+			local plugin = makePlugin("SlowStarter", "Server", {
+				Init = function(_self, _sandbox) end,
+				Start = function(_self, _sandbox)
+					task.wait(0.05)
+				end,
+			})
+			plugin.Descriptor.StartTimeout = 0.01
+
+			local nextPlugin = makePlugin("AfterSlowStarter", "Server", {
+				Init = function(_self, _sandbox) end,
+				Start = function(_self, _sandbox)
+					nextStarted = true
+				end,
+			}, { "SlowStarter" })
+
+			mgr:LoadPlugins(nil, { plugin, nextPlugin })
+			mgr:InitPlugins()
+			mgr:StartPlugins()
+
+			check.equal(nextStarted, true)
+			check.equal(mgr:GetStatus("SlowStarter"), "Errored")
+			check.equal(mgr:GetStatus("AfterSlowStarter"), "Running")
 		end)
 
 		test.case("DestroyPlugins clears registry", function()
@@ -618,6 +836,31 @@ return function()
 			mgr:DestroyPlugins()
 
 			check.equal(mgr:GetStatus("ToDestroy"), nil)
+		end)
+
+		test.case("DestroyPlugins skips Destroy hook for errored plugins", function()
+			local mgr = buildManager()
+			local destroyCalled = false
+
+			local plugin = makePlugin("ErroredDestroySkip", "Server", {
+				Init = function(_self, _sandbox) end,
+				Start = function(_self, _sandbox)
+					error("intentional crash in Start")
+				end,
+				Destroy = function(_self, _sandbox)
+					destroyCalled = true
+				end,
+			})
+
+			mgr:LoadPlugins(nil, { plugin })
+			mgr:InitPlugins()
+			mgr:StartPlugins()
+			task.wait()
+			check.equal(mgr:GetStatus("ErroredDestroySkip"), "Errored")
+
+			mgr:DestroyPlugins()
+
+			check.equal(destroyCalled, false)
 		end)
 	end)
 end

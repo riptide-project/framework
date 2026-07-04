@@ -6,29 +6,76 @@ description: Server-authoritative global and per-player state synchronization.
 
 The `StateReplication` module provides minimal, server-authoritative state synchronization. The server owns all state; clients receive automatic snapshot sync on connect and delta updates in real-time.
 
-Access via `Riptide.State`.
+Prefer side-specific access through `Riptide.Server.State` or `Riptide.Client.State`. The root `Riptide.State` alias remains available for compatibility and dynamic shared code.
 
 ## Types
 
 ```lua
 type Callback = (value: any) -> ()
 
-type StateReplicationAPI = {
+type StateReplicationBaseAPI = {
     Events: { Delta: string, Snapshot: string },
+    Get: (self, key: string, player: Player?) -> any,
+}
 
-    -- Server-only
+type StateReplicationServerAPI = StateReplicationBaseAPI & {
     Set: (self, key: string, value: any) -> (),
-    SetForPlayer: (self, player: any, key: string, value: any) -> (),
-    UpdateForPlayer: (self, player: any, key: string, updater: (oldValue: any) -> any) -> any,
+    SetForPlayer: (self, player: Player, key: string, value: any) -> (),
+    UpdateForPlayer: (self, player: Player, key: string, updater: (oldValue: any) -> any) -> any,
+    TypedServer: <T>() -> T,
+}
 
-    -- Shared
-    Get: (self, key: string, player: any?) -> any,
-
-    -- Client-only
+type StateReplicationClientAPI = StateReplicationBaseAPI & {
     Subscribe: (self, key: string, callback: Callback) -> () -> (),
     RequestSync: (self) -> boolean,
+    TypedClient: <T>() -> T,
 }
 ```
+
+## Typed State Proxies
+
+Maelstrom-2 adds typed key proxies for state schemas. Dynamic string methods remain available, but typed proxies give autocomplete for state keys and typed values.
+
+### Client Schema
+
+```lua
+type ClientState = {
+    coins: StateReplication.ClientKey<number>,
+    matchPhase: StateReplication.ClientKey<"Intermission" | "Running">,
+}
+
+local State = Riptide.Client.State.TypedClient<ClientState>()
+
+local coins = State.coins:Get()
+
+local unsubscribe = State.matchPhase:Subscribe(function(phase)
+    if phase == "Running" then
+        showRoundUi()
+    end
+end)
+```
+
+### Server Schema
+
+```lua
+type ServerState = {
+    coins: StateReplication.ServerKey<number>,
+    matchPhase: StateReplication.ServerKey<"Intermission" | "Running">,
+}
+
+local State = Riptide.Server.State.TypedServer<ServerState>()
+
+State.matchPhase:Set("Intermission")
+State.coins:SetForPlayer(player, 100)
+
+local newCoins = State.coins:UpdateForPlayer(player, function(old)
+    return (old or 0) + 25
+end)
+```
+
+:::note
+Typed state proxies are a DX layer over the same replication engine. They delegate to `Get`, `Set`, `SetForPlayer`, `UpdateForPlayer`, and `Subscribe` using the field name as the state key.
+:::
 
 ## Scopes
 
@@ -54,8 +101,8 @@ State:Set(key: string, value: any) -> ()
 Sets a **global** state value and broadcasts a delta to all connected clients.
 
 ```lua
-Riptide.State:Set("matchPhase", "Intermission")
-Riptide.State:Set("serverTime", os.time())
+Riptide.Server.State:Set("matchPhase", "Intermission")
+Riptide.Server.State:Set("serverTime", os.time())
 ```
 
 ---
@@ -69,7 +116,7 @@ State:SetForPlayer(player: Player, key: string, value: any) -> ()
 Sets a **player-scoped** state value. Only the target player receives the delta.
 
 ```lua
-Riptide.State:SetForPlayer(player, "coins", 500)
+Riptide.Server.State:SetForPlayer(player, "coins", 500)
 ```
 
 :::note
@@ -87,7 +134,7 @@ State:UpdateForPlayer(player: Player, key: string, updater: (oldValue: any) -> a
 Atomically updates a player-scoped value using a callback. Returns the new value.
 
 ```lua
-local newCoins = Riptide.State:UpdateForPlayer(player, "coins", function(old)
+local newCoins = Riptide.Server.State:UpdateForPlayer(player, "coins", function(old)
     return (old or 0) + 50
 end)
 print("Player now has", newCoins, "coins")
@@ -108,14 +155,14 @@ Reads a state value.
 **Server** — returns the player-scoped value if `player` is given and a player override exists, otherwise returns the global value:
 
 ```lua
-local globalPhase = Riptide.State:Get("matchPhase")
-local playerCoins = Riptide.State:Get("coins", player)
+local globalPhase = Riptide.Server.State:Get("matchPhase")
+local playerCoins = Riptide.Server.State:Get("coins", player)
 ```
 
 **Client** — ignores the `player` parameter. Resolves player-scoped first, then falls back to global:
 
 ```lua
-local coins = Riptide.State:Get("coins")
+local coins = Riptide.Client.State:Get("coins")
 ```
 
 ---
@@ -135,7 +182,7 @@ Subscribes to changes on a specific key. The callback is invoked:
 Returns an **unsubscribe** function.
 
 ```lua
-local unsubscribe = Riptide.State:Subscribe("coins", function(value)
+local unsubscribe = Riptide.Client.State:Subscribe("coins", function(value)
     coinLabel.Text = "Coins: " .. tostring(value or 0)
 end)
 
@@ -150,7 +197,7 @@ Always call the unsubscribe function when the UI element or controller is destro
 :::note
 The immediate callback may receive `nil` if the state hasn't been replicated yet (e.g., the server hasn't set the value, or the snapshot is still in transit). Always handle `nil` defensively:
 ```lua
-Riptide.State:Subscribe("coins", function(value)
+Riptide.Client.State:Subscribe("coins", function(value)
     coinLabel.Text = "Coins: " .. tostring(value or 0)
 end)
 ```
@@ -171,7 +218,7 @@ The request is **asynchronous** — it fires an event to the server and applies 
 Returns `true` if the request was dispatched, `false` if Network is unavailable, called on server, or a request is already in flight.
 
 ```lua
-local sent = Riptide.State:RequestSync()
+local sent = Riptide.Client.State:RequestSync()
 if sent then
     print("Snapshot re-sync requested.")
 end

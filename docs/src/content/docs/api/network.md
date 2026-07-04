@@ -6,33 +6,88 @@ description: Unified event communication between client and server.
 
 The `Network` module provides a unified communication layer over a single `RemoteEvent` / `UnreliableRemoteEvent` pair. All networking goes through **named string dispatchers** — no manual remote management required.
 
-> **v0.9.1 breaking change:** `RemoteFunction`-based APIs (`InvokeClient`, `InvokeServer`) have been removed. Use `Riptide.Async` over paired `FireServer`/`FireClient` calls for request/response patterns instead.
+> **Maelstrom breaking change:** `RemoteFunction`-based APIs (`InvokeClient`, `InvokeServer`) have been removed. Use `Riptide.Async` over paired `FireServer`/`FireClient` calls for request/response patterns instead.
 
-Access via `Riptide.Network`.
+Prefer side-specific access through `Riptide.Server.Network` or `Riptide.Client.Network`. The root `Riptide.Network` alias remains available for compatibility and dynamic shared code.
 
 ## Types
 
 ```lua
 type Callback = (...any) -> any
 type Middleware = (...any) -> any
+type Validator = (value: any) -> (boolean, string?)
 
-type NetworkAPI = {
+type NetworkBaseAPI = {
     Register: (funcName: string, callback: Callback) -> (),
+    RegisterTyped: (funcName: string, validators: { Validator }, callback: Callback) -> (),
+    RegisterTypedUnreliable: (funcName: string, validators: { Validator }, callback: Callback) -> (),
     Unregister: (funcName: string, callback: Callback) -> (),
     UseMiddleware: (scope: "server" | "client", middleware: Middleware) -> (),
     ClearMiddlewares: (scope: ("server" | "client")?) -> (),
+}
 
-    -- Server-only
-    FireClient: ((player: Player, funcName: string, ...any) -> ())?,
-    FireAllClients: ((funcName: string, ...any) -> ())?,
-    UnreliableFireClient: ((player: Player, funcName: string, ...any) -> ())?,
-    UnreliableFireAllClients: ((funcName: string, ...any) -> ())?,
+type NetworkServerAPI = NetworkBaseAPI & {
+    FireClient: (player: Player, funcName: string, ...any) -> (),
+    FireAllClients: (funcName: string, ...any) -> (),
+    UnreliableFireClient: (player: Player, funcName: string, ...any) -> (),
+    UnreliableFireAllClients: (funcName: string, ...any) -> (),
+    TypedServer: <TEvents>() -> TypedServer<TEvents>,
+}
 
-    -- Client-only
-    FireServer: ((funcName: string, ...any) -> ())?,
-    UnreliableFireServer: ((funcName: string, ...any) -> ())?,
+type NetworkClientAPI = NetworkBaseAPI & {
+    FireServer: (funcName: string, ...any) -> (),
+    UnreliableFireServer: (funcName: string, ...any) -> (),
+    TypedClient: <TEvents>() -> TypedClient<TEvents>,
 }
 ```
+
+---
+
+## Typed Event Proxies
+
+Maelstrom-2 adds typed proxy factories for outbound events. They keep the dynamic string APIs available, but let Luau autocomplete event names as fields and check payloads from your event map.
+
+### Client to Server
+
+```lua
+type ServerEvents = {
+    PurchaseItem: (itemId: string, count: number) -> (),
+    EquipItem: (itemId: string) -> (),
+}
+
+local Net = Riptide.Client.Network.TypedClient<ServerEvents>()
+
+Net.PurchaseItem("sword", 1)
+Net.EquipItem("sword")
+```
+
+At runtime this delegates to:
+
+```lua
+Riptide.Client.Network.FireServer("PurchaseItem", "sword", 1)
+```
+
+### Server to Client
+
+```lua
+type ClientEvents = {
+    RewardPlayer: (player: Player, amount: number, reason: string) -> (),
+}
+
+local Net = Riptide.Server.Network.TypedServer<ClientEvents>()
+
+Net.RewardPlayer(player, 100, "Quest")
+```
+
+At runtime this delegates to:
+
+```lua
+Riptide.Server.Network.FireClient(player, "RewardPlayer", 100, "Quest")
+```
+
+:::note
+The typed proxy is a DX layer for outbound calls. Runtime validation still belongs at inbound boundaries through `RegisterTyped`, `RegisterTypedUnreliable`, and server middleware.
+:::
 
 ---
 
@@ -49,7 +104,7 @@ Registers a handler for a named network event. Multiple handlers can be register
 **Server example** — callback receives `player` as the first argument:
 
 ```lua
-Riptide.Network.Register("PlayerJumped", function(player, height)
+Riptide.Server.Network.Register("PlayerJumped", function(player, height)
     print(player.Name .. " jumped " .. height .. " studs!")
 end)
 ```
@@ -57,7 +112,7 @@ end)
 **Client example** — no player argument:
 
 ```lua
-Riptide.Network.Register("ShowNotification", function(message)
+Riptide.Client.Network.Register("ShowNotification", function(message)
     print("Server says:", message)
 end)
 ```
@@ -76,7 +131,7 @@ This is the recommended way to handle **any client-to-server event** where you c
 
 ```lua
 -- Guard validators enforce types at the network boundary
-Riptide.Network.RegisterTyped("BuyItem", {
+Riptide.Server.Network.RegisterTyped("BuyItem", {
     Riptide.Guard.String(50),       -- arg1: itemId,  string max 50 chars
     Riptide.Guard.Number(0, 1000),  -- arg2: price,   number 0–1000
 }, function(player, itemId, price)
@@ -104,9 +159,9 @@ local function onPing(player, data)
     -- handle
 end
 
-Riptide.Network.Register("Ping", onPing)
+Riptide.Server.Network.Register("Ping", onPing)
 -- Later...
-Riptide.Network.Unregister("Ping", onPing)
+Riptide.Server.Network.Unregister("Ping", onPing)
 ```
 
 ---
@@ -123,7 +178,7 @@ Adds a middleware function to the processing pipeline. Middlewares run as a flat
 
 ```lua
 -- (player, funcName, args: {any}) -> boolean?
-Riptide.Network.UseMiddleware("server", function(player, funcName, args)
+Riptide.Server.Network.UseMiddleware("server", function(player, funcName, args)
     if not isAuthenticated(player) then
         return false  -- return false to abort the chain
     end
@@ -136,7 +191,7 @@ end)
 
 ```lua
 -- (funcName, args: {any}) -> boolean?
-Riptide.Network.UseMiddleware("client", function(funcName, args)
+Riptide.Client.Network.UseMiddleware("client", function(funcName, args)
     print("[Network] Received:", funcName)
     -- no return = continue chain
 end)
@@ -157,8 +212,8 @@ Network.ClearMiddlewares(scope: ("server" | "client")?) -> ()
 Clears all registered middlewares. If `scope` is `nil`, clears **both** server and client pipelines.
 
 ```lua
-Riptide.Network.ClearMiddlewares("server")  -- server only
-Riptide.Network.ClearMiddlewares()           -- both
+Riptide.Server.Network.ClearMiddlewares("server") -- server only
+Riptide.Server.Network.ClearMiddlewares()         -- both
 ```
 
 ---
@@ -176,7 +231,7 @@ Network.FireClient(player: Player, funcName: string, ...any) -> ()
 Fires a named event to a specific player.
 
 ```lua
-Riptide.Network.FireClient(player, "DataLoaded", playerData)
+Riptide.Server.Network.FireClient(player, "DataLoaded", playerData)
 ```
 
 ### `FireAllClients`
@@ -188,7 +243,7 @@ Network.FireAllClients(funcName: string, ...any) -> ()
 Broadcasts a named event to all connected players.
 
 ```lua
-Riptide.Network.FireAllClients("GlobalNotification", "Double XP activated!")
+Riptide.Server.Network.FireAllClients("GlobalNotification", "Double XP activated!")
 ```
 
 ### `UnreliableFireClient` / `UnreliableFireAllClients`
@@ -201,7 +256,7 @@ Network.UnreliableFireAllClients(funcName: string, ...any) -> ()
 Fires a named event over an `UnreliableRemoteEvent`. Ideal for high-frequency, non-critical data like particles, hitmarkers, or positional updates.
 
 ```lua
-Riptide.Network.UnreliableFireAllClients("PlayerRotated", player, CFrame.new())
+Riptide.Server.Network.UnreliableFireAllClients("PlayerRotated", player, CFrame.new())
 ```
 
 :::tip
@@ -223,7 +278,7 @@ Network.FireServer(funcName: string, ...any) -> ()
 Fires a named event to the server.
 
 ```lua
-Riptide.Network.FireServer("RequestPurchase", itemId, quantity)
+Riptide.Client.Network.FireServer("RequestPurchase", itemId, quantity)
 ```
 
 ### `UnreliableFireServer`
@@ -235,7 +290,7 @@ Network.UnreliableFireServer(funcName: string, ...any) -> ()
 Fires a named event to the server over an `UnreliableRemoteEvent`. Use for extremely frequent inputs (e.g., aim direction).
 
 ```lua
-Riptide.Network.UnreliableFireServer("UpdateAimDirection", Vector3.new(0, 1, 0))
+Riptide.Client.Network.UnreliableFireServer("UpdateAimDirection", Vector3.new(0, 1, 0))
 ```
 
 ---
@@ -256,13 +311,13 @@ For request/response patterns (previously handled by `RemoteFunction`), use `Rip
 
 ```lua
 -- Server: respond to a client request
-Riptide.Network.Register("GetInventory", function(player)
-    Riptide.Network.FireClient(player, "GetInventory_Response", getPlayerInventory(player))
+Riptide.Server.Network.Register("GetInventory", function(player)
+    Riptide.Server.Network.FireClient(player, "GetInventory_Response", getPlayerInventory(player))
 end)
 
 -- Client: fire + wait for response
-Riptide.Network.FireServer("GetInventory")
-local inventory = Riptide.Network.Register("GetInventory_Response", function(data)
+Riptide.Client.Network.FireServer("GetInventory")
+local inventory = Riptide.Client.Network.Register("GetInventory_Response", function(data)
     -- handle data
 end)
 ```

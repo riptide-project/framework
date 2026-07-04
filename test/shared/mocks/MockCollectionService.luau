@@ -1,7 +1,6 @@
 --!strict
 -- Mock CollectionService for Lune testing
 -- Simulates tag-based instance tracking
---!strict
 local isRoblox = typeof(game) ~= "nil"
 local task = task
 if not isRoblox then
@@ -73,7 +72,7 @@ end
 
 function MockCollectionService:GetTagged(tag: string): { any }
 	self:_ensureTag(tag)
-	return self._tags[tag]
+	return table.clone(self._tags[tag])
 end
 
 function MockCollectionService:GetInstanceAddedSignal(tag: string): any

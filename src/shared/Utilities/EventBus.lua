@@ -6,21 +6,25 @@ type Callback = (...any) -> any
 type UnsubscribeFn = () -> ()
 
 export type EventBus = {
-	Emit: (self: EventBus, name: string, ...any) -> (),
-	On: (self: EventBus, name: string, callback: Callback) -> UnsubscribeFn,
+	Emit: <T...>(self: EventBus, name: string, T...) -> (),
+	On: <T...>(self: EventBus, name: string, callback: (T...) -> any) -> UnsubscribeFn,
+	Once: <T...>(self: EventBus, name: string, callback: (T...) -> any) -> UnsubscribeFn,
 	Clear: (self: EventBus) -> (),
+	Destroy: (self: EventBus) -> (),
 }
 
 type EventBusInternal = EventBus & {
 	_listeners: { [string]: { Callback } },
+	_label: string,
 }
 
 local EventBus = {}
 EventBus.__index = EventBus
 
-function EventBus.new(): EventBus
+function EventBus.new(label: string?): EventBus
 	local self = setmetatable({
 		_listeners = {} :: { [string]: { Callback } },
+		_label = label or "[EventBus]",
 	}, EventBus)
 	return (self :: any) :: EventBus
 end
@@ -40,7 +44,7 @@ function EventBus:Emit(name: string, ...: any)
 			listener(table.unpack(args))
 		end, debug.traceback)
 		if not ok then
-			warn(string.format("[EventBus] Error in listener for '%s': %s", name, tostring(err)))
+			warn(string.format("%s Error in listener for '%s': %s", self._label, name, tostring(err)))
 		end
 	end
 end
@@ -68,8 +72,32 @@ function EventBus:On(name: string, callback: Callback): UnsubscribeFn
 	end
 end
 
+function EventBus:Once(name: string, callback: Callback): UnsubscribeFn
+	local unsubscribe: UnsubscribeFn? = nil
+	unsubscribe = self:On(name, function(...: any)
+		local currentUnsubscribe = unsubscribe
+		if currentUnsubscribe then
+			currentUnsubscribe()
+			unsubscribe = nil
+		end
+		callback(...)
+	end)
+
+	return function()
+		local currentUnsubscribe = unsubscribe
+		if currentUnsubscribe then
+			currentUnsubscribe()
+			unsubscribe = nil
+		end
+	end
+end
+
 function EventBus:Clear()
 	table.clear(self._listeners)
+end
+
+function EventBus:Destroy()
+	self:Clear()
 end
 
 return {

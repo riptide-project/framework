@@ -93,7 +93,7 @@ return function()
 
 			local timeouts = 0
 			for i = 1, 500 do
-				if results[i] == nil then
+				if results[i] and results[i].timedOut == true then
 					timeouts += 1
 				end
 			end

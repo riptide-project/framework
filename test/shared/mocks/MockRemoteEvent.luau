@@ -1,7 +1,6 @@
 --!strict
 -- Mock RemoteEvent for Lune testing
 -- Simulates Roblox RemoteEvent using Signal
---!strict
 local isRoblox = typeof(game) ~= "nil"
 local task = task
 if not isRoblox then

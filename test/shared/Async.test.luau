@@ -165,9 +165,12 @@ return function()
 				end,
 			})
 
-			check.equal(results[1], "a")
-			check.equal(results[2], "b")
-			check.equal(results[3], "c")
+			check.equal(results[1].ok, true)
+			check.equal(results[1].value, "a")
+			check.equal(results[2].ok, true)
+			check.equal(results[2].value, "b")
+			check.equal(results[3].ok, true)
+			check.equal(results[3].value, "c")
 		end)
 
 		test.case("should handle yielding functions", function()
@@ -182,15 +185,13 @@ return function()
 				end,
 			}, 1)
 
-			check.equal(results[1], 1)
-			check.equal(results[2], 2)
+			check.equal(results[1].ok, true)
+			check.equal(results[1].value, 1)
+			check.equal(results[2].ok, true)
+			check.equal(results[2].value, 2)
 		end)
 
-		test.case("should return nil for failed tasks without crashing", function()
-			local asyncAny = Async :: any
-			local previousSuppress = asyncAny._suppressParallelWarnings
-			asyncAny._suppressParallelWarnings = true
-
+		test.case("should return explicit error result for failed tasks without crashing", function()
 			local results = Async.Parallel({
 				function()
 					return "ok"
@@ -203,13 +204,33 @@ return function()
 				end,
 			})
 
-			asyncAny._suppressParallelWarnings = previousSuppress
+			task.wait()
+
+			check.equal(results[1].ok, true)
+			check.equal(results[1].value, "ok")
+			check.equal(results[2].ok, false)
+			check.is_true(string.find(tostring(results[2].error), "boom") ~= nil)
+			check.equal(results[3].ok, true)
+			check.equal(results[3].value, "also ok")
+		end)
+
+		test.case("should distinguish successful nil from failed tasks", function()
+			local results = Async.Parallel({
+				function()
+					return nil
+				end,
+				function()
+					error("boom")
+				end,
+			})
 
 			task.wait()
 
-			check.equal(results[1], "ok")
-			check.equal(results[2], nil)
-			check.equal(results[3], "also ok")
+			check.equal(results[1].ok, true)
+			check.equal(results[1].value, nil)
+			check.equal(results[1].error, nil)
+			check.equal(results[2].ok, false)
+			check.is_true(string.find(tostring(results[2].error), "boom") ~= nil)
 		end)
 
 		test.case("should timeout and return partial results", function()
@@ -223,8 +244,10 @@ return function()
 				end,
 			}, 0.1)
 
-			check.equal(results[1], "fast")
-			check.equal(results[2], nil) -- timed out
+			check.equal(results[1].ok, true)
+			check.equal(results[1].value, "fast")
+			check.equal(results[2].ok, false)
+			check.equal(results[2].timedOut, true)
 		end)
 
 		test.case("should error on negative timeout", function()

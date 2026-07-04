@@ -9,6 +9,15 @@ local test = frktest.test
 local check = frktest.assert.check
 
 local ComponentService = Env.RiptideShared.ComponentService
+local MockCollectionService = Env.Mocks.MockCollectionService
+local Signal = Env.RiptideShared.Signal
+
+local function createMockInstance(name: string): any
+	return {
+		Name = name,
+		Destroying = Signal.new(),
+	}
+end
 
 return function()
 	test.suite("ComponentService", function()
@@ -133,6 +142,102 @@ return function()
 			-- Reset for other tests
 			cs._isStarted = false
 			cs._suppressWarnings = previousSuppress
+		end)
+
+		test.case("should create and cleanup manual components through CollectionService signals", function()
+			local mockCollectionService = MockCollectionService.new()
+			ComponentService:_init({
+				CollectionService = mockCollectionService,
+			})
+
+			local destroyedCount = 0
+			local ComponentClass = {
+				new = function(instance)
+					return {
+						instance = instance,
+						Destroy = function()
+							destroyedCount += 1
+						end,
+					}
+				end,
+			}
+
+			local instance = createMockInstance("TaggedPart")
+			ComponentService:_registerTagManually("TestComponent", ComponentClass)
+			mockCollectionService:AddTag(instance, "TestComponent")
+
+			local component = ComponentService:Get(instance, "TestComponent") :: any
+			check.not_nil(component)
+			check.equal(component.instance, instance)
+
+			mockCollectionService:RemoveTag(instance, "TestComponent")
+
+			check.equal(destroyedCount, 1)
+			check.equal(ComponentService:Get(instance, "TestComponent"), nil)
+		end)
+
+		test.case("should reset registered components and listeners on init", function()
+			local mockCollectionService = MockCollectionService.new()
+			ComponentService:_init({
+				CollectionService = mockCollectionService,
+			})
+
+			local destroyedCount = 0
+			local ComponentClass = {
+				new = function(_instance)
+					return {
+						Destroy = function()
+							destroyedCount += 1
+						end,
+					}
+				end,
+			}
+
+			local instance = createMockInstance("ResetPart")
+			ComponentService:_registerTagManually("ResetComponent", ComponentClass)
+			mockCollectionService:AddTag(instance, "ResetComponent")
+			check.not_nil(ComponentService:Get(instance, "ResetComponent"))
+
+			ComponentService:_init({
+				CollectionService = MockCollectionService.new(),
+			})
+
+			check.equal(destroyedCount, 1)
+			check.equal(ComponentService:Get(instance, "ResetComponent"), nil)
+			check.equal(next((ComponentService :: any)._tagListeners), nil)
+		end)
+
+		test.case("should unregister a tag for multiple instances without skipped cleanup", function()
+			local mockCollectionService = MockCollectionService.new()
+			ComponentService:_init({
+				CollectionService = mockCollectionService,
+			})
+
+			local destroyedCount = 0
+			local ComponentClass = {
+				new = function(_instance)
+					return {
+						Destroy = function()
+							destroyedCount += 1
+						end,
+					}
+				end,
+			}
+
+			local first = createMockInstance("FirstPart")
+			local second = createMockInstance("SecondPart")
+			ComponentService:_registerTagManually("MultiInstanceComponent", ComponentClass)
+			mockCollectionService:AddTag(first, "MultiInstanceComponent")
+			mockCollectionService:AddTag(second, "MultiInstanceComponent")
+
+			check.not_nil(ComponentService:Get(first, "MultiInstanceComponent"))
+			check.not_nil(ComponentService:Get(second, "MultiInstanceComponent"))
+
+			ComponentService:UnregisterTag("MultiInstanceComponent")
+
+			check.equal(destroyedCount, 2)
+			check.equal(ComponentService:Get(first, "MultiInstanceComponent"), nil)
+			check.equal(ComponentService:Get(second, "MultiInstanceComponent"), nil)
 		end)
 	end)
 end

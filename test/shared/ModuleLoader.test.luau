@@ -140,5 +140,146 @@ return function()
 			ModuleLoader.NormalizeFolders = originalNormalizeFolders
 			check.equal(startedWith, componentsFolder)
 		end)
+
+		test.case("should inject side-specific API into module lifecycle hooks", function()
+			local injectedInitRef = nil
+			local injectedStartRef = nil
+			local injectedPlayerLifecycleRef = nil
+			local serverRef = {
+				ComponentService = {
+					_start = function() end,
+				},
+				PlayerLifecycle = {
+					Start = function(_self: any, _modules: any, riptideRef: any)
+						injectedPlayerLifecycleRef = riptideRef
+					end,
+				},
+			}
+			local riptide = {
+				_modules = {},
+				_moduleAliases = {},
+				ComponentService = {
+					_start = function() end,
+				},
+				Server = serverRef,
+			}
+
+			local originalLoadModules = ModuleLoader.LoadModules
+			local originalNormalizeFolders = ModuleLoader.NormalizeFolders
+			ModuleLoader.NormalizeFolders = function(_input: any, fieldName: string)
+				if fieldName == "ModulesFolder" then
+					return { {} :: any }
+				end
+				return {}
+			end
+			ModuleLoader.LoadModules = function(
+				_folder: Folder,
+				_seenModuleScripts: { [ModuleScript]: boolean },
+				_loadedRiptide: any,
+				loadedModules: { { name: string, module: any } },
+				_sideName: string
+			)
+				table.insert(loadedModules, {
+					name = "SideAwareService",
+					module = {
+						Init = function(_self: any, riptideRef: any)
+							injectedInitRef = riptideRef
+						end,
+						Start = function(_self: any, riptideRef: any)
+							injectedStartRef = riptideRef
+						end,
+					},
+				})
+			end
+
+			ModuleLoader.Launch("Server", riptide, {
+				ModulesFolder = {} :: any,
+			})
+
+			task.wait()
+			ModuleLoader.LoadModules = originalLoadModules
+			ModuleLoader.NormalizeFolders = originalNormalizeFolders
+
+			check.equal(injectedInitRef, serverRef)
+			check.equal(injectedStartRef, serverRef)
+			check.equal(injectedPlayerLifecycleRef, serverRef)
+		end)
+
+		test.case("should load and start plugins before game module Start", function()
+			local lifecycle = {}
+			local riptide = {
+				_modules = {},
+				_moduleAliases = {},
+				ComponentService = {
+					_start = function(_self: any, _folder: any)
+						table.insert(lifecycle, "ComponentStart")
+					end,
+				},
+				PlayerLifecycle = {
+					Start = function(_self: any, _modules: any, _riptideRef: any)
+						table.insert(lifecycle, "PlayerLifecycleStart")
+					end,
+				},
+				Plugins = {
+					LoadPlugins = function(_self: any, _pluginsFolder: any, _externalPlugins: any)
+						table.insert(lifecycle, "PluginLoad")
+					end,
+					InitPlugins = function(_self: any)
+						table.insert(lifecycle, "PluginInit")
+					end,
+					StartPlugins = function(_self: any)
+						table.insert(lifecycle, "PluginStart")
+					end,
+				},
+			}
+
+			local originalLoadModules = ModuleLoader.LoadModules
+			local originalNormalizeFolders = ModuleLoader.NormalizeFolders
+			ModuleLoader.NormalizeFolders = function(_input: any, fieldName: string)
+				if fieldName == "ModulesFolder" then
+					return { {} :: any }
+				end
+				return {}
+			end
+			ModuleLoader.LoadModules = function(
+				_folder: Folder,
+				_seenModuleScripts: { [ModuleScript]: boolean },
+				_loadedRiptide: any,
+				loadedModules: { { name: string, module: any } },
+				_sideName: string
+			)
+				table.insert(lifecycle, "ModuleLoad")
+				table.insert(loadedModules, {
+					name = "GameService",
+					module = {
+						Init = function(_self: any, _riptideRef: any)
+							table.insert(lifecycle, "ModuleInit")
+						end,
+						Start = function(_self: any, _riptideRef: any)
+							table.insert(lifecycle, "ModuleStart")
+						end,
+					},
+				})
+			end
+
+			ModuleLoader.Launch("Server", riptide, {
+				ModulesFolder = {} :: any,
+				ComponentsFolder = {} :: any,
+				ExternalPlugins = {},
+			})
+
+			task.wait()
+			ModuleLoader.LoadModules = originalLoadModules
+			ModuleLoader.NormalizeFolders = originalNormalizeFolders
+
+			check.equal(lifecycle[1], "PluginLoad")
+			check.equal(lifecycle[2], "PluginInit")
+			check.equal(lifecycle[3], "ModuleLoad")
+			check.equal(lifecycle[4], "ComponentStart")
+			check.equal(lifecycle[5], "ModuleInit")
+			check.equal(lifecycle[6], "PluginStart")
+			check.equal(lifecycle[7], "PlayerLifecycleStart")
+			check.equal(lifecycle[8], "ModuleStart")
+		end)
 	end)
 end

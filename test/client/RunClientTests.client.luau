@@ -7,6 +7,8 @@ local console_reporter = frktest.reporters.console_reporter
 
 console_reporter.init()
 
+local loadFailures: { string } = {}
+
 local function loadTests(parent: Instance)
 	for _, child in parent:GetChildren() do
 		if child:IsA("ModuleScript") then
@@ -20,7 +22,10 @@ local function loadTests(parent: Instance)
 				end)
 
 				if not ok then
-					warn(string.format("[Client QA] Failed to load %s: %s", child:GetFullName(), tostring(err)))
+					local message =
+						string.format("[Client QA] Failed to load %s: %s", child:GetFullName(), tostring(err))
+					table.insert(loadFailures, message)
+					warn(message)
 				end
 			end
 		end
@@ -51,12 +56,16 @@ print("----------------------------------------")
 print("[Client] Running loaded test suites...")
 print("----------------------------------------")
 
-local success = frktest.run()
+local testSuccess = frktest.run()
+local success = testSuccess and #loadFailures == 0
 
 print("========================================")
 if success then
 	print("✅ [Client] All tests passed!")
 else
+	for _, failure in ipairs(loadFailures) do
+		warn(failure)
+	end
 	warn("❌ [Client] Some tests failed!")
 end
 print("========================================")

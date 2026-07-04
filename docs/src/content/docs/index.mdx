@@ -6,7 +6,7 @@ hero:
   tagline: Lightweight. Strictly typed. Built for production Roblox games.
   image:
     file: ../../assets/logo.png
-  actions: [{ text: "Getting Started", link: "./guides/getting-started/", icon: "right-arrow", variant: "primary" }, { text: "API Reference", link: "./api/network/", icon: "external", variant: "minimal" }]
+  actions: [{ text: "Getting Started", link: "./guides/getting-started/", icon: "right-arrow", variant: "primary" }, { text: "Examples", link: "./examples/server-service/", icon: "document", variant: "minimal" }, { text: "Migration", link: "./migration/from-0-8-2/", icon: "external", variant: "minimal" }]
 ---
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
@@ -15,15 +15,32 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 
 <CardGrid stagger>
 	<Card title="Phased Initialization" icon="rocket">
-		Deterministic **Load → Init → Start** lifecycle eliminates race conditions. Dependency injection via `GetService` / `GetController` — no more circular `require()` chains.
+		Deterministic **Load → Init → Start** lifecycle eliminates race conditions. Lifecycle hooks receive side-specific Riptide APIs so autocomplete stays honest without extra prefixes.
 	</Card>
 	<Card title="Unified Networking" icon="document">
-		Single `RemoteEvent` + `RemoteFunction` pair with named dispatch, middleware pipelines, and zero `ReplicatedStorage` clutter.
+		Single `RemoteEvent` + `UnreliableRemoteEvent` pair with named dispatch, middleware pipelines, and zero `ReplicatedStorage` clutter.
 	</Card>
 	<Card title="Strictly Typed" icon="setting">
 		`--!strict` Luau throughout. Fully typed API surface with exported types for autocomplete and compile-time safety.
 	</Card>
 	<Card title="State Replication" icon="open-book">
 		Server-authoritative global and per-player state with automatic snapshot sync, delta updates, and reactive `Subscribe` on clients.
+	</Card>
+</CardGrid>
+
+## Quick Links
+
+<CardGrid>
+	<Card title="Examples" icon="document" href="./examples/server-service/">
+		Copy practical server, typed Network/State, and plugin examples using the current Maelstrom-2 API.
+	</Card>
+	<Card title="Migration" icon="external" href="./migration/from-0-8-2/">
+		Move from `0.8.2` stable or `0.9.0-maelstrom.1` with focused breaking-change checklists.
+	</Card>
+	<Card title="Plugin System" icon="setting" href="./guides/plugins/">
+		Build sandboxed framework extensions that become ready before player replay and game module `Start`.
+	</Card>
+	<Card title="API Reference" icon="open-book" href="./api/network/">
+		Reference pages for Network, State, components, lifecycle, module loading, and utilities.
 	</Card>
 </CardGrid>

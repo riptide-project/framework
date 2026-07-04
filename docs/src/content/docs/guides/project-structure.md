@@ -81,9 +81,9 @@ Shared modules are **always loaded before** side-specific modules. This means yo
 local ReplicatedStorage   = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
-local Riptide = require(ReplicatedStorage.Packages.Riptide)
+local Riptide = require(ReplicatedStorage.Packages.Riptide).Server
 
-Riptide.Server.Launch({
+Riptide.Launch({
     ModulesFolder       = ServerScriptService.Services,
     SharedModulesFolder = ReplicatedStorage.SharedModules,  -- optional
     ComponentsFolder    = ReplicatedStorage.Components,     -- optional
@@ -97,9 +97,9 @@ Riptide.Server.Launch({
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players           = game:GetService("Players")
 
-local Riptide = require(ReplicatedStorage.Packages.Riptide)
+local Riptide = require(ReplicatedStorage.Packages.Riptide).Client
 
-Riptide.Client.Launch({
+Riptide.Launch({
     ModulesFolder       = Players.LocalPlayer.PlayerScripts.Controllers,
     SharedModulesFolder = ReplicatedStorage.SharedModules,  -- optional
     ComponentsFolder    = ReplicatedStorage.Components,     -- optional
@@ -117,7 +117,7 @@ Riptide.Client.Launch({
 Both `ModulesFolder` and `SharedModulesFolder` accept an **array of folders**, making it easy to split large codebases across multiple directories:
 
 ```lua
-Riptide.Server.Launch({
+Riptide.Launch({
     ModulesFolder = {
         ServerScriptService.CoreServices,
         ServerScriptService.GameplayServices,
@@ -146,7 +146,7 @@ ReplicatedStorage/
 ```
 
 ```lua
-Riptide.Server.Launch({
+Riptide.Launch({
     ModulesFolder    = ServerScriptService.Services,
     ComponentsFolder = ReplicatedStorage.Components,
 })

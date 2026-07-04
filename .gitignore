@@ -11,12 +11,16 @@
 /luau_packages/
 /.pesde/
 /node_modules/
+/wally.lock
+/pesde.lock
 
 # Generated files / build outputs
 sourcemap.json
 /build/
 /dist/
 /out/
+/tmp/
+/.tmp/
 *.rbxm
 *.rbxmx
 
@@ -29,6 +33,11 @@ sourcemap.json
 *.log*
 .eslintcache
 .stylelintcache
+
+# Environment files
+.env
+.env.*
+!.env.example
 
 # Lune runtimes/cache
 .lune/.runtime-cache/

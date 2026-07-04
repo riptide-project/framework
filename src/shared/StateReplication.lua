@@ -25,11 +25,61 @@ export type StateReplicationDeps = {
 	Network: NetworkLike,
 }
 
+export type StateReplicationEvents = {
+	Delta: string,
+	Snapshot: string,
+}
+
+export type StateReplicationCommonAPI = {
+	Events: StateReplicationEvents,
+	_init: (self: any, deps: StateReplicationDeps) -> (),
+	Get: (self: any, key: string, player: any?) -> any,
+}
+
+export type ServerKey<T> = {
+	Get: (self: ServerKey<T>, player: any?) -> T?,
+	Set: (self: ServerKey<T>, value: T) -> (),
+	SetForPlayer: (self: ServerKey<T>, player: any, value: T) -> (),
+	UpdateForPlayer: (self: ServerKey<T>, player: any, updater: (oldValue: T?) -> T) -> T,
+}
+
+export type ClientKey<T> = {
+	Get: (self: ClientKey<T>) -> T?,
+	Subscribe: (self: ClientKey<T>, callback: (value: T?) -> ()) -> () -> (),
+}
+
+export type StateReplicationServerBaseAPI = StateReplicationCommonAPI & {
+	Set: (self: StateReplicationServerBaseAPI, key: string, value: any) -> (),
+	SetForPlayer: (self: StateReplicationServerBaseAPI, player: any, key: string, value: any) -> (),
+	UpdateForPlayer: (
+		self: StateReplicationServerBaseAPI,
+		player: any,
+		key: string,
+		updater: (oldValue: any) -> any
+	) -> any,
+	_onPlayerRemoving: (self: StateReplicationServerBaseAPI, player: any) -> (),
+}
+
+export type StateReplicationClientBaseAPI = StateReplicationCommonAPI & {
+	Subscribe: (self: StateReplicationClientBaseAPI, key: string, callback: Callback) -> () -> (),
+	RequestSync: (self: StateReplicationClientBaseAPI) -> boolean,
+}
+
+export type TypedServer<TSchema> = StateReplicationServerBaseAPI & TSchema
+export type TypedClient<TSchema> = StateReplicationClientBaseAPI & TSchema
+
+export type StateReplicationServerAPI = StateReplicationServerBaseAPI & {
+	TypedServer: <TSchema>() -> TypedServer<TSchema>,
+	TypedClient: nil,
+}
+
+export type StateReplicationClientAPI = StateReplicationClientBaseAPI & {
+	TypedServer: nil,
+	TypedClient: <TSchema>() -> TypedClient<TSchema>,
+}
+
 export type StateReplicationAPI = {
-	Events: {
-		Delta: string,
-		Snapshot: string,
-	},
+	Events: StateReplicationEvents,
 	_init: (self: StateReplicationAPI, deps: StateReplicationDeps) -> (),
 	Set: (self: StateReplicationAPI, key: string, value: any) -> (),
 	SetForPlayer: (self: StateReplicationAPI, player: any, key: string, value: any) -> (),
@@ -38,10 +88,13 @@ export type StateReplicationAPI = {
 	Subscribe: (self: StateReplicationAPI, key: string, callback: Callback) -> () -> (),
 	RequestSync: (self: StateReplicationAPI) -> boolean,
 	_onPlayerRemoving: (self: StateReplicationAPI, player: any) -> (),
+	TypedServer: (<TSchema>() -> TypedServer<TSchema>)?,
+	TypedClient: (<TSchema>() -> TypedClient<TSchema>)?,
 }
 
 local EVENT_DELTA = "__riptide_state_delta"
 local EVENT_SNAPSHOT = "__riptide_state_snapshot"
+local SNAPSHOT_REQUEST_COOLDOWN_SECONDS = 1
 
 local function shallowCopy(source: { [string]: any }): { [string]: any }
 	return table.clone(source)
@@ -84,6 +137,54 @@ local function snapshotResolvedState(self: any): { [string]: any }
 	return resolved
 end
 
+local function isValidDelta(scope: any, key: any, version: any): boolean
+	if scope ~= "global" and scope ~= "player" then
+		warn(string.format("[StateReplication] Ignoring malformed delta with invalid scope: %s", tostring(scope)))
+		return false
+	end
+	if type(key) ~= "string" then
+		warn(string.format("[StateReplication] Ignoring malformed delta with non-string key: %s", typeof(key)))
+		return false
+	end
+	if type(version) ~= "number" or version ~= version then
+		warn(string.format("[StateReplication] Ignoring malformed delta with invalid version: %s", tostring(version)))
+		return false
+	end
+	return true
+end
+
+local function getSnapshotMap(snapshot: any, fieldName: string): { [any]: any }
+	local value = snapshot[fieldName]
+	if value == nil then
+		return {}
+	end
+	if type(value) ~= "table" then
+		warn(string.format("[StateReplication] Ignoring malformed snapshot field '%s'.", fieldName))
+		return {}
+	end
+	return value
+end
+
+local function applySnapshotValues(target: { [string]: any }, source: { [any]: any })
+	for k, v in pairs(source) do
+		if type(k) == "string" then
+			target[k] = v
+		else
+			warn("[StateReplication] Ignoring snapshot value with non-string key.")
+		end
+	end
+end
+
+local function applySnapshotVersions(target: { [string]: number }, source: { [any]: any })
+	for k, v in pairs(source) do
+		if type(k) == "string" and type(v) == "number" and v == v then
+			target[k] = v
+		else
+			warn("[StateReplication] Ignoring malformed snapshot version entry.")
+		end
+	end
+end
+
 -- Flat args: (scope, key, value, version) — no payload table allocation.
 local function applyClientDelta(self: any, scope: string, key: string, value: any, version: number)
 	local versions: { [string]: number }
@@ -115,6 +216,8 @@ end
 -- ---------------------------------------------------------------------------
 
 local StateReplication = {} :: StateReplicationAPI
+local TypedServerProxy: any = nil
+local TypedClientProxy: any = nil
 
 StateReplication.Events = {
 	Delta = EVENT_DELTA,
@@ -142,6 +245,101 @@ StateReplication._syncBuffer = {} :: { { any } }
 StateReplication._subscribers = {} :: { [string]: { Callback } }
 StateReplication._deltaHandler = nil :: ((...any) -> any)?
 StateReplication._snapshotHandler = nil :: ((...any) -> any)?
+StateReplication._snapshotRequestTimes = {} :: { [any]: number }
+
+local function createServerKeyProxy(key: string): any
+	return {
+		Get = function(_self: any, player: any?)
+			return StateReplication:Get(key, player)
+		end,
+		Set = function(_self: any, value: any)
+			StateReplication:Set(key, value)
+		end,
+		SetForPlayer = function(_self: any, player: any, value: any)
+			StateReplication:SetForPlayer(player, key, value)
+		end,
+		UpdateForPlayer = function(_self: any, player: any, updater: (oldValue: any) -> any): any
+			return StateReplication:UpdateForPlayer(player, key, updater)
+		end,
+	}
+end
+
+local function createClientKeyProxy(key: string): any
+	return {
+		Get = function(_self: any)
+			return StateReplication:Get(key)
+		end,
+		Subscribe = function(_self: any, callback: Callback): () -> ()
+			return StateReplication:Subscribe(key, callback)
+		end,
+	}
+end
+
+local function createTypedServerProxy(): any
+	local keyCache: { [string]: any } = {}
+
+	return setmetatable({}, {
+		__index = function(_self, key: any)
+			local stateMember = (StateReplication :: any)[key]
+			if stateMember ~= nil then
+				return stateMember
+			end
+
+			if type(key) ~= "string" then
+				return nil
+			end
+
+			local keyProxy = keyCache[key]
+			if keyProxy then
+				return keyProxy
+			end
+
+			keyProxy = createServerKeyProxy(key)
+			keyCache[key] = keyProxy
+			return keyProxy
+		end,
+	})
+end
+
+local function createTypedClientProxy(): any
+	local keyCache: { [string]: any } = {}
+
+	return setmetatable({}, {
+		__index = function(_self, key: any)
+			local stateMember = (StateReplication :: any)[key]
+			if stateMember ~= nil then
+				return stateMember
+			end
+
+			if type(key) ~= "string" then
+				return nil
+			end
+
+			local keyProxy = keyCache[key]
+			if keyProxy then
+				return keyProxy
+			end
+
+			keyProxy = createClientKeyProxy(key)
+			keyCache[key] = keyProxy
+			return keyProxy
+		end,
+	})
+end
+
+local function typedServer<TSchema>(): TypedServer<TSchema>
+	if not TypedServerProxy then
+		TypedServerProxy = createTypedServerProxy()
+	end
+	return (TypedServerProxy :: any) :: TypedServer<TSchema>
+end
+
+local function typedClient<TSchema>(): TypedClient<TSchema>
+	if not TypedClientProxy then
+		TypedClientProxy = createTypedClientProxy()
+	end
+	return (TypedClientProxy :: any) :: TypedClient<TSchema>
+end
 
 local function resetState(self: any)
 	if self._network and self._deltaHandler then
@@ -165,7 +363,12 @@ local function resetState(self: any)
 	table.clear(self._clientPlayerVersions)
 	table.clear(self._subscribers)
 	table.clear(self._syncBuffer)
+	table.clear(self._snapshotRequestTimes)
 	self._syncYielding = false
+	TypedServerProxy = nil
+	TypedClientProxy = nil
+	self.TypedServer = nil
+	self.TypedClient = nil
 
 	self._playerState = {}
 	self._playerVersions = {}
@@ -191,16 +394,31 @@ function StateReplication:_init(deps: StateReplicationDeps)
 	self._initialized = true
 
 	if self._isServer then
+		self.TypedServer = typedServer
+		self.TypedClient = nil
+
 		-- SERVER: respond to client snapshot requests.
 		-- Protocol: client fires EVENT_SNAPSHOT (no args) → server fires back
 		--           one structured snapshot table to that specific client.
 		self._snapshotHandler = function(player: any)
+			if player == nil then
+				warn("[StateReplication] Ignoring snapshot request without a player.")
+				return
+			end
 			local net = self._network
 			if not (net and net.FireClient) then
 				return
 			end
+
+			local now = os.clock()
+			local lastRequestTime = self._snapshotRequestTimes[player]
+			if lastRequestTime ~= nil and now - lastRequestTime < SNAPSHOT_REQUEST_COOLDOWN_SECONDS then
+				return
+			end
+			self._snapshotRequestTimes[player] = now
+
 			local playerState = self._playerState[player] or {}
-			local playerVersions = self._playerVersions[player] or {};
+			local playerVersions = self._playerVersions[player] or {}
 			(net.FireClient :: any)(player, EVENT_SNAPSHOT, {
 				global = shallowCopy(self._globalState),
 				globalVersions = shallowCopy(self._globalVersions),
@@ -210,8 +428,14 @@ function StateReplication:_init(deps: StateReplicationDeps)
 		end
 		self._network.Register(EVENT_SNAPSHOT, self._snapshotHandler)
 	else
+		self.TypedServer = nil
+		self.TypedClient = typedClient
+
 		-- CLIENT: receive flat-arg delta packets and buffer them during sync.
-		self._deltaHandler = function(scope: string, key: string, value: any, version: number)
+		self._deltaHandler = function(scope: any, key: any, value: any, version: any)
+			if not isValidDelta(scope, key, version) then
+				return
+			end
 			if self._syncYielding then
 				table.insert(self._syncBuffer, { scope, key, value, version })
 			else
@@ -388,18 +612,10 @@ function StateReplication:RequestSync(): boolean
 		table.clear(self._clientPlayerState)
 		table.clear(self._clientPlayerVersions)
 
-		for k, v in pairs(snapshot.global or {}) do
-			self._clientGlobalState[k] = v
-		end
-		for k, v in pairs(snapshot.globalVersions or {}) do
-			self._clientGlobalVersions[k] = v
-		end
-		for k, v in pairs(snapshot.player or {}) do
-			self._clientPlayerState[k] = v
-		end
-		for k, v in pairs(snapshot.playerVersions or {}) do
-			self._clientPlayerVersions[k] = v
-		end
+		applySnapshotValues(self._clientGlobalState, getSnapshotMap(snapshot, "global"))
+		applySnapshotVersions(self._clientGlobalVersions, getSnapshotMap(snapshot, "globalVersions"))
+		applySnapshotValues(self._clientPlayerState, getSnapshotMap(snapshot, "player"))
+		applySnapshotVersions(self._clientPlayerVersions, getSnapshotMap(snapshot, "playerVersions"))
 
 		local currentResolved = snapshotResolvedState(self)
 
@@ -417,7 +633,9 @@ function StateReplication:RequestSync(): boolean
 
 		-- Drain buffered deltas that arrived during the round-trip.
 		for _, buffered in ipairs(self._syncBuffer) do
-			applyClientDelta(self, buffered[1] :: string, buffered[2] :: string, buffered[3], buffered[4] :: number)
+			if isValidDelta(buffered[1], buffered[2], buffered[4]) then
+				applyClientDelta(self, buffered[1] :: string, buffered[2] :: string, buffered[3], buffered[4] :: number)
+			end
 		end
 		table.clear(self._syncBuffer)
 	end
@@ -440,6 +658,7 @@ function StateReplication:_onPlayerRemoving(player: any)
 	end
 	self._playerState[player] = nil
 	self._playerVersions[player] = nil
+	self._snapshotRequestTimes[player] = nil
 end
 
 return StateReplication

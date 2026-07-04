@@ -5,6 +5,8 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local AsyncModule = require(script.shared.Utilities.Async)
 local ComponentServiceModule = require(script.shared.ComponentService)
+local EventBusModule = require(script.shared.Utilities.EventBus)
+local GuardModule = require(script.shared.Utilities.Guard)
 local ModuleLoader = require(script.shared.ModuleLoader)
 local NetworkModule = require(script.shared.Network)
 local PlayerLifecycleModule = require(script.shared.PlayerLifecycle)
@@ -13,17 +15,11 @@ local SignalModule = require(script.shared.Utilities.Signal)
 local StateMachineModule = require(script.shared.StateMachine)
 local StateReplicationModule = require(script.shared.StateReplication)
 local TroveModule = require(script.shared.Utilities.Trove)
-local EventBusModule = require(script.shared.Utilities.EventBus)
-local GuardModule = require(script.shared.Utilities.Guard)
 
 local IS_SERVER = RunService:IsServer()
 local REMOTE_WAIT_TIMEOUT = 10
 
-export type RiptideLaunch = {
-	Launch: (config: ModuleLoader.Config) -> (),
-}
-
-export type RiptideServer = {
+export type RiptideCore = {
 	Network: NetworkModule.NetworkAPI,
 	Signal: typeof(SignalModule),
 	Async: typeof(AsyncModule),
@@ -36,18 +32,33 @@ export type RiptideServer = {
 	EventBus: typeof(EventBusModule),
 	Guard: typeof(GuardModule),
 	GetModule: (name: string) -> any,
-	GetService: (name: string) -> any,
-	Server: RiptideLaunch,
 	_modules: { [string]: any },
 	_moduleAliases: { [string]: string | false },
 }
 
-export type RiptideClient = {
-	Network: NetworkModule.NetworkAPI,
+export type RiptideServer = {
+	Network: NetworkModule.NetworkServerAPI,
 	Signal: typeof(SignalModule),
 	Async: typeof(AsyncModule),
 	ComponentService: ComponentServiceModule.ComponentServiceAPI,
-	State: StateReplicationModule.StateReplicationAPI,
+	State: StateReplicationModule.StateReplicationServerAPI,
+	StateMachine: typeof(StateMachineModule),
+	PlayerLifecycle: PlayerLifecycleModule.PlayerLifecycleAPI,
+	Plugins: PluginManagerModule.PluginManagerAPI,
+	Trove: typeof(TroveModule),
+	EventBus: typeof(EventBusModule),
+	Guard: typeof(GuardModule),
+	GetModule: (name: string) -> any,
+	GetService: (name: string) -> any,
+	Launch: (config: ModuleLoader.Config) -> (),
+}
+
+export type RiptideClient = {
+	Network: NetworkModule.NetworkClientAPI,
+	Signal: typeof(SignalModule),
+	Async: typeof(AsyncModule),
+	ComponentService: ComponentServiceModule.ComponentServiceAPI,
+	State: StateReplicationModule.StateReplicationClientAPI,
 	StateMachine: typeof(StateMachineModule),
 	Plugins: PluginManagerModule.PluginManagerAPI,
 	Trove: typeof(TroveModule),
@@ -55,12 +66,15 @@ export type RiptideClient = {
 	Guard: typeof(GuardModule),
 	GetModule: (name: string) -> any,
 	GetController: (name: string) -> any,
-	Client: RiptideLaunch,
-	_modules: { [string]: any },
-	_moduleAliases: { [string]: string | false },
+	Launch: (config: ModuleLoader.Config) -> (),
 }
 
-export type Riptide = RiptideServer & RiptideClient
+export type Riptide = RiptideCore & {
+	Server: RiptideServer?,
+	Client: RiptideClient?,
+	GetService: ((name: string) -> any)?,
+	GetController: ((name: string) -> any)?,
+}
 
 local Riptide = {} :: Riptide
 local isLaunched = false
@@ -212,22 +226,47 @@ end
 
 if IS_SERVER then
 	Riptide.Server = {
+		Network = (NetworkModule :: any) :: NetworkModule.NetworkServerAPI,
+		Signal = SignalModule,
+		Async = AsyncModule,
+		ComponentService = ComponentServiceModule,
+		State = (StateReplicationModule :: any) :: StateReplicationModule.StateReplicationServerAPI,
+		StateMachine = StateMachineModule,
+		PlayerLifecycle = PlayerLifecycleModule,
+		Plugins = PluginManagerModule,
+		Trove = TroveModule,
+		EventBus = EventBusModule,
+		Guard = GuardModule,
+		GetModule = Riptide.GetModule,
+		GetService = Riptide.GetModule,
 		Launch = function(config: ModuleLoader.Config)
 			launch("Server", config)
 		end,
 	}
 	Riptide.GetService = Riptide.GetModule
-	Riptide.GetController = function()
+	Riptide.GetController = function(_name: string)
 		error("🌊 [Riptide] GetController is not available on the server. Use GetService instead.")
 	end
 else
 	Riptide.Client = {
+		Network = (NetworkModule :: any) :: NetworkModule.NetworkClientAPI,
+		Signal = SignalModule,
+		Async = AsyncModule,
+		ComponentService = ComponentServiceModule,
+		State = (StateReplicationModule :: any) :: StateReplicationModule.StateReplicationClientAPI,
+		StateMachine = StateMachineModule,
+		Plugins = PluginManagerModule,
+		Trove = TroveModule,
+		EventBus = EventBusModule,
+		Guard = GuardModule,
+		GetModule = Riptide.GetModule,
+		GetController = Riptide.GetModule,
 		Launch = function(config: ModuleLoader.Config)
 			launch("Client", config)
 		end,
 	}
 	Riptide.GetController = Riptide.GetModule
-	Riptide.GetService = function()
+	Riptide.GetService = function(_name: string)
 		error("🌊 [Riptide] GetService is not available on the client. Use GetController instead.")
 	end
 end

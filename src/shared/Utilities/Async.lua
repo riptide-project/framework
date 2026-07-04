@@ -6,10 +6,17 @@ local task = task
 if not task then
 	task = require("@lune/task")
 end
+export type AsyncResult<T> = {
+	ok: boolean,
+	value: T?,
+	error: string?,
+	timedOut: boolean?,
+}
+
 export type AsyncModule = {
 	Run: (fn: (...any) -> ...any, timeout: number, ...any) -> ...any,
 	Retry: (fn: (...any) -> ...any, maxAttempts: number, delay: number?, ...any) -> ...any,
-	Parallel: (fns: { () -> any }, timeout: number?) -> { any },
+	Parallel: (fns: { () -> any }, timeout: number?) -> { AsyncResult<any> },
 }
 
 local Async = {}
@@ -128,16 +135,17 @@ function Async.Retry(fn: (...any) -> ...any, maxAttempts: number, delay: number?
 end
 
 --[[
-	Runs an array of functions in parallel and waits for all to complete.
-	If `timeout` is provided, returns after the timeout with `nil` for unfinished tasks.
-	
-	@param fns Array of zero-argument functions to execute.
-	@param timeout Optional maximum duration to wait for all results (in seconds).
-	@return Array of results in the same order as `fns`. Failed functions return nil.
-]]
-function Async.Parallel(fns: { () -> any }, timeout: number?): { any }
+		Runs an array of functions in parallel and waits for all to complete.
+		If `timeout` is reached, unfinished tasks return an explicit timeout result.
+
+		@param fns Array of zero-argument functions to execute.
+		@param timeout Optional maximum duration to wait for all results (in seconds).
+		@return Array of explicit result objects in the same order as `fns`.
+	]]
+function Async.Parallel(fns: { () -> any }, timeout: number?): { AsyncResult<any> }
 	local count = #fns
-	local results: { any } = table.create(count)
+	local results: { AsyncResult<any> } = table.create(count)
+	local completed: { boolean } = table.create(count)
 	local remaining = count
 	local thread = coroutine.running()
 	local isYielding = false
@@ -155,10 +163,21 @@ function Async.Parallel(fns: { () -> any }, timeout: number?): { any }
 	for i, fn in ipairs(fns) do
 		task.spawn(function()
 			local ok, result = pcall(fn)
+			if isDone then
+				return
+			end
+
+			completed[i] = true
 			if ok then
-				results[i] = result
+				results[i] = {
+					ok = true,
+					value = result,
+				}
 			else
-				results[i] = nil
+				results[i] = {
+					ok = false,
+					error = tostring(result),
+				}
 			end
 
 			remaining -= 1
@@ -179,6 +198,15 @@ function Async.Parallel(fns: { () -> any }, timeout: number?): { any }
 	-- Timeout safety (defaulted when omitted)
 	task.delay(timeoutSeconds, function()
 		if not isDone then
+			for i = 1, count do
+				if not completed[i] then
+					results[i] = {
+						ok = false,
+						error = "[Async.Parallel] Task timed out.",
+						timedOut = true,
+					}
+				end
+			end
 			isDone = true
 			task.spawn(thread)
 		end

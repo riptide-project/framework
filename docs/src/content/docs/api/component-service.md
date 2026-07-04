@@ -127,7 +127,9 @@ This is useful for hot-reload or test teardown scenarios.
 ComponentService is started automatically when you pass `ComponentsFolder` in your Launch config:
 
 ```lua
-Riptide.Server.Launch({
+local Riptide = require(ReplicatedStorage.Packages.Riptide).Server
+
+Riptide.Launch({
     ModulesFolder = ServerScriptService.Services,
     ComponentsFolder = ReplicatedStorage.Components,  -- ← enables ComponentService
 })

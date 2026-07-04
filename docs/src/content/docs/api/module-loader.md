@@ -42,6 +42,8 @@ local svc = Riptide:GetService("DataService")
 ```
 :::
 
+Lifecycle hooks receive the side-specific API directly. Server services get `Riptide.Server`; client controllers get `Riptide.Client`. Entry scripts can still import the side explicitly with `require(...).Server` or `require(...).Client`.
+
 ### `GetModule`
 
 ```lua
@@ -63,7 +65,7 @@ local data = Riptide.GetModule("Economy/PlayerData")
 ### `GetService`
 
 ```lua
-Riptide.GetService(name: string) -> any        -- server only
+Riptide.GetService(name: string) -> any
 ```
 
 Server-side alias for `GetModule`. **Throws an error** if called on the client.
@@ -80,7 +82,7 @@ end
 ### `GetController`
 
 ```lua
-Riptide.GetController(name: string) -> any      -- client only
+Riptide.GetController(name: string) -> any
 ```
 
 Client-side alias for `GetModule`. **Throws an error** if called on the server.
@@ -127,11 +129,16 @@ When two modules share the same short name (e.g., `Economy/Utils` and `Combat/Ut
 
 When `Launch` is called:
 
-1. **Shared modules** (`SharedModulesFolder`) are loaded first.
-2. **Side-specific modules** (`ModulesFolder`) are loaded second.
-3. **Deduplication** — if a `ModuleScript` appears in multiple folders (e.g., via linked instances), it is only loaded once.
+1. **Plugins** (`PluginsFolder` / `ExternalPlugins`) are loaded and initialized first. Plugins are framework extensions, so their `PublicAPI` and sandbox registrations are available before game modules load.
+2. **Shared modules** (`SharedModulesFolder`) are loaded.
+3. **Side-specific modules** (`ModulesFolder`) are loaded.
+4. **ComponentService** starts if `ComponentsFolder` is configured.
+5. **Module Init** runs synchronously.
+6. **Plugin Start readiness** completes before player lifecycle replay and game module `Start`.
+7. **PlayerLifecycle** starts on the server and replays existing players.
+8. **Module Start** is dispatched asynchronously.
 
-This guarantees shared utilities are available before services or controllers that depend on them.
+If a `ModuleScript` appears in multiple module folders (for example through linked instances), it is only loaded once.
 
 ---
 
@@ -141,34 +148,40 @@ The framework exports clean types for use in your modules:
 
 ```lua
 export type RiptideServer = {
-    Network: NetworkAPI,
+    Network: NetworkServerAPI,
     Signal: typeof(Signal),
     Async: typeof(Async),
     ComponentService: ComponentServiceAPI,
-    State: StateReplicationAPI,
+    State: StateReplicationServerAPI,
     PlayerLifecycle: any,
     GetModule: (name: string) -> any,
     GetService: (name: string) -> any,
-    Server: { Launch: (config: Config) -> () },
+    Launch: (config: Config) -> (),
 }
 
 export type RiptideClient = {
-    Network: NetworkAPI,
+    Network: NetworkClientAPI,
     Signal: typeof(Signal),
     Async: typeof(Async),
     ComponentService: ComponentServiceAPI,
-    State: StateReplicationAPI,
+    State: StateReplicationClientAPI,
     GetModule: (name: string) -> any,
     GetController: (name: string) -> any,
-    Client: { Launch: (config: Config) -> () },
+    Launch: (config: Config) -> (),
 }
 
-export type Riptide = RiptideServer & RiptideClient
+export type Riptide = {
+    Server: RiptideServer?,
+    Client: RiptideClient?,
+}
 ```
 
 Use in your modules for full autocomplete:
 
 ```lua
 local RiptidePkg = require(ReplicatedStorage.Packages.Riptide)
-type Riptide = RiptidePkg.Riptide
+type RiptideServer = RiptidePkg.RiptideServer
+type RiptideClient = RiptidePkg.RiptideClient
 ```
+
+The root package still exposes compatibility aliases, but new entry scripts should prefer `require(...).Server` or `require(...).Client`. Lifecycle hooks receive that same side-specific API directly, so module code can use `Riptide.Network`, `Riptide.State`, and `Riptide.GetService` / `Riptide.GetController` without repeating `.Server` or `.Client`.

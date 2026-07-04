@@ -28,18 +28,19 @@ type StateLike = {
 }
 
 type SignalLike = {
-	new: () -> SignalInstance,
+	new: <T...>() -> SignalInstance<T...>,
 }
 
-type SignalInstance = {
-	Destroy: (self: SignalInstance) -> (),
-	Connect: (self: SignalInstance, fn: (...any) -> ()) -> any,
-	Fire: (self: SignalInstance, ...any) -> (),
+type SignalInstance<T... = ...any> = {
+	Destroy: (self: SignalInstance<T...>) -> (),
+	Connect: (self: SignalInstance<T...>, fn: (T...) -> ()) -> any,
+	Fire: (self: SignalInstance<T...>, T...) -> (),
 	[string]: any,
 }
 
 type ComponentServiceLike = {
 	_start: (self: any, componentsFolder: Folder) -> (),
+	_registerTagManually: ((self: any, tagName: string, componentClass: ComponentClass) -> ())?,
 	UnregisterTag: (self: any, tagName: string) -> (),
 	[string]: any,
 }
@@ -99,10 +100,13 @@ export type SandboxDeps = {
 	Async: any,
 	-- Injected by PluginManager after construction:
 	PluginName: string,
-	GetPluginAPI: (pluginName: string) -> { [string]: any }?,
+	GetPluginAPI: (pluginName: string) -> PluginPublicAPI?,
 	EmitBusEvent: (eventName: string, ...any) -> (),
 	OnBusEvent: (eventName: string, callback: Callback) -> UnsubscribeFn,
+	OnceBusEvent: (eventName: string, callback: Callback) -> UnsubscribeFn,
 }
+
+export type PluginPublicAPI = { [string]: unknown }
 
 export type PluginSandboxAPI = {
 	PluginName: string,
@@ -120,28 +124,26 @@ export type PluginSandboxAPI = {
 	FireAllClients: (self: PluginSandboxAPI, name: string, ...any) -> (),
 	FireServer: (self: PluginSandboxAPI, name: string, ...any) -> (),
 
-	-- Network (core escape hatch — no namespacing)
-	OnCoreEvent: (self: PluginSandboxAPI, name: string, callback: Callback) -> (),
-
 	-- Signals
-	CreateSignal: (self: PluginSandboxAPI) -> SignalInstance,
+	CreateSignal: <T...>(self: PluginSandboxAPI) -> SignalInstance<T...>,
 
 	-- Components
 	RegisterComponent: (self: PluginSandboxAPI, tag: string, componentClass: ComponentClass) -> (),
 
 	-- Event Bus (inter-plugin)
-	Emit: (self: PluginSandboxAPI, eventName: string, ...any) -> (),
-	On: (self: PluginSandboxAPI, eventName: string, callback: Callback) -> UnsubscribeFn,
+	Emit: <T...>(self: PluginSandboxAPI, eventName: string, T...) -> (),
+	On: <T...>(self: PluginSandboxAPI, eventName: string, callback: (T...) -> any) -> UnsubscribeFn,
+	Once: <T...>(self: PluginSandboxAPI, eventName: string, callback: (T...) -> any) -> UnsubscribeFn,
 
 	-- Logging
 	Log: (self: PluginSandboxAPI, message: string) -> (),
 	Warn: (self: PluginSandboxAPI, message: string) -> (),
 
 	-- Inter-plugin
-	GetPluginAPI: (self: PluginSandboxAPI, pluginName: string) -> { [string]: any }?,
+	GetPluginAPI: (self: PluginSandboxAPI, pluginName: string) -> PluginPublicAPI?,
 
 	-- Async
-	RunAsync: (self: PluginSandboxAPI, fn: Callback, timeout: number, ...any) -> any,
+	RunAsync: (self: PluginSandboxAPI, fn: Callback, timeout: number, ...any) -> ...any,
 
 	-- Internal: called by PluginManager on crash — NOT for plugin use
 	CleanupAll: (self: PluginSandboxAPI) -> (),
@@ -188,7 +190,10 @@ end
 --- @param deps SandboxDeps — all core module references plus plugin-specific callbacks.
 function PluginSandbox.new(deps: SandboxDeps): PluginSandboxAPI
 	assert(type(deps) == "table", "[PluginSandbox] deps must be a table.")
-	assert(type(deps.PluginName) == "string" and #deps.PluginName > 0, "[PluginSandbox] deps.PluginName must be a non-empty string.")
+	assert(
+		type(deps.PluginName) == "string" and #deps.PluginName > 0,
+		"[PluginSandbox] deps.PluginName must be a non-empty string."
+	)
 	assert(deps.Network ~= nil, "[PluginSandbox] deps.Network is required.")
 	assert(deps.State ~= nil, "[PluginSandbox] deps.State is required.")
 	assert(deps.Signal ~= nil, "[PluginSandbox] deps.Signal is required.")
@@ -197,6 +202,7 @@ function PluginSandbox.new(deps: SandboxDeps): PluginSandboxAPI
 	assert(type(deps.GetPluginAPI) == "function", "[PluginSandbox] deps.GetPluginAPI must be a function.")
 	assert(type(deps.EmitBusEvent) == "function", "[PluginSandbox] deps.EmitBusEvent must be a function.")
 	assert(type(deps.OnBusEvent) == "function", "[PluginSandbox] deps.OnBusEvent must be a function.")
+	assert(type(deps.OnceBusEvent) == "function", "[PluginSandbox] deps.OnceBusEvent must be a function.")
 
 	local self = setmetatable({
 		PluginName = deps.PluginName,
@@ -309,30 +315,10 @@ function PluginSandbox:FireServer(name: string, ...: any)
 end
 
 -- ---------------------------------------------------------------------------
--- Network (core escape hatch — raw event name, no namespacing)
--- ---------------------------------------------------------------------------
-
---- Registers a handler on a raw core network event name.
---- WARNING: Bypasses plugin namespacing. Use only for intentional core integration.
-function PluginSandbox:OnCoreEvent(name: string, callback: Callback)
-	assert(type(name) == "string" and #name > 0, "[PluginSandbox] OnCoreEvent: name must be a non-empty string.")
-	assert(type(callback) == "function", "[PluginSandbox] OnCoreEvent: callback must be a function.")
-
-	self._deps.Network.Register(name, callback)
-
-	local entry: TroveEntryNetworkHandler = {
-		kind = "networkHandler",
-		name = name,
-		callback = callback,
-	}
-	track(self, entry)
-end
-
--- ---------------------------------------------------------------------------
 -- Signals
 -- ---------------------------------------------------------------------------
 
-function PluginSandbox:CreateSignal(): SignalInstance
+function PluginSandbox:CreateSignal<T...>(): SignalInstance<T...>
 	local signal = self._deps.Signal.new()
 	local entry: TroveEntrySignal = {
 		kind = "signal",
@@ -349,15 +335,18 @@ end
 function PluginSandbox:RegisterComponent(tag: string, componentClass: ComponentClass)
 	assert(type(tag) == "string" and #tag > 0, "[PluginSandbox] RegisterComponent: tag must be a non-empty string.")
 	assert(type(componentClass) == "table", "[PluginSandbox] RegisterComponent: componentClass must be a table.")
-	assert(type(componentClass.new) == "function", "[PluginSandbox] RegisterComponent: componentClass must have a 'new' constructor.")
+	assert(
+		type(componentClass.new) == "function",
+		"[PluginSandbox] RegisterComponent: componentClass must have a 'new' constructor."
+	)
 
 	-- ComponentService._start auto-discovers from a folder; here we register
 	-- a single tag directly via the CollectionService listeners on the CS itself.
 	-- We call an internal _registerTag helper if available, or warn if not.
 	-- This allows ComponentService to remain the source of truth.
-	local cs = self._deps.ComponentService :: any
-	if type(cs._registerTagManually) == "function" then
-		cs:_registerTagManually(tag, componentClass)
+	local registerTagManually = self._deps.ComponentService._registerTagManually
+	if type(registerTagManually) == "function" then
+		registerTagManually(self._deps.ComponentService, tag, componentClass)
 	else
 		-- Fallback: warn rather than crash — ComponentService may not yet expose
 		-- this method until the integration PR lands.
@@ -383,7 +372,10 @@ end
 -- ---------------------------------------------------------------------------
 
 function PluginSandbox:Emit(eventName: string, ...: any)
-	assert(type(eventName) == "string" and #eventName > 0, "[PluginSandbox] Emit: eventName must be a non-empty string.")
+	assert(
+		type(eventName) == "string" and #eventName > 0,
+		"[PluginSandbox] Emit: eventName must be a non-empty string."
+	)
 	self._deps.EmitBusEvent(eventName, ...)
 end
 
@@ -392,6 +384,22 @@ function PluginSandbox:On(eventName: string, callback: Callback): UnsubscribeFn
 	assert(type(callback) == "function", "[PluginSandbox] On: callback must be a function.")
 
 	local unsubscribe = self._deps.OnBusEvent(eventName, callback)
+	local entry: TroveEntryEventBus = {
+		kind = "eventBus",
+		unsubscribe = unsubscribe,
+	}
+	track(self, entry)
+	return unsubscribe
+end
+
+function PluginSandbox:Once(eventName: string, callback: Callback): UnsubscribeFn
+	assert(
+		type(eventName) == "string" and #eventName > 0,
+		"[PluginSandbox] Once: eventName must be a non-empty string."
+	)
+	assert(type(callback) == "function", "[PluginSandbox] Once: callback must be a function.")
+
+	local unsubscribe = self._deps.OnceBusEvent(eventName, callback)
 	local entry: TroveEntryEventBus = {
 		kind = "eventBus",
 		unsubscribe = unsubscribe,
@@ -416,8 +424,11 @@ end
 -- Inter-plugin API access
 -- ---------------------------------------------------------------------------
 
-function PluginSandbox:GetPluginAPI(pluginName: string): { [string]: any }?
-	assert(type(pluginName) == "string" and #pluginName > 0, "[PluginSandbox] GetPluginAPI: pluginName must be a non-empty string.")
+function PluginSandbox:GetPluginAPI(pluginName: string): PluginPublicAPI?
+	assert(
+		type(pluginName) == "string" and #pluginName > 0,
+		"[PluginSandbox] GetPluginAPI: pluginName must be a non-empty string."
+	)
 	return self._deps.GetPluginAPI(pluginName)
 end
 
@@ -425,7 +436,7 @@ end
 -- Async
 -- ---------------------------------------------------------------------------
 
-function PluginSandbox:RunAsync(fn: Callback, timeout: number, ...: any): any
+function PluginSandbox:RunAsync(fn: Callback, timeout: number, ...: any): ...any
 	assert(type(fn) == "function", "[PluginSandbox] RunAsync: fn must be a function.")
 	assert(type(timeout) == "number" and timeout > 0, "[PluginSandbox] RunAsync: timeout must be a positive number.")
 
@@ -451,19 +462,15 @@ function PluginSandbox:CleanupAll()
 			if entry.kind == "signal" then
 				local e = entry :: TroveEntrySignal
 				e.signal:Destroy()
-
 			elseif entry.kind == "networkHandler" then
 				local e = entry :: TroveEntryNetworkHandler
 				self._deps.Network.Unregister(e.name, e.callback)
-
 			elseif entry.kind == "stateSubscription" then
 				local e = entry :: TroveEntryStateSubscription
 				e.unsubscribe()
-
 			elseif entry.kind == "eventBus" then
 				local e = entry :: TroveEntryEventBus
 				e.unsubscribe()
-
 			elseif entry.kind == "componentTag" then
 				local e = entry :: TroveEntryComponentTag
 				local cs = self._deps.ComponentService :: any
@@ -474,12 +481,14 @@ function PluginSandbox:CleanupAll()
 		end)
 
 		if not ok then
-			warn(string.format(
-				"🔌 [Plugin:%s] CleanupAll error (entry.kind=%s): %s",
-				self.PluginName,
-				tostring(entry.kind),
-				tostring(err)
-			))
+			warn(
+				string.format(
+					"🔌 [Plugin:%s] CleanupAll error (entry.kind=%s): %s",
+					self.PluginName,
+					tostring(entry.kind),
+					tostring(err)
+				)
+			)
 		end
 	end
 

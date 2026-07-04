@@ -24,12 +24,15 @@ if isRoblox then
 		PluginSandbox = require(SharedFolder:WaitForChild("PluginSandbox")),
 		Signal = require(UtilitiesFolder:WaitForChild("Signal")),
 		Async = require(UtilitiesFolder:WaitForChild("Async")),
+		EventBus = require(UtilitiesFolder:WaitForChild("EventBus")),
+		Trove = require(UtilitiesFolder:WaitForChild("Trove")),
 	}
 
 	Env.Mocks = {
 		MockRemoteEvent = require(script.Parent:WaitForChild("mocks"):WaitForChild("MockRemoteEvent")),
 		MockRemoteFunction = require(script.Parent:WaitForChild("mocks"):WaitForChild("MockRemoteFunction")),
 		MockPlayers = require(script.Parent:WaitForChild("mocks"):WaitForChild("MockPlayers")),
+		MockCollectionService = require(script.Parent:WaitForChild("mocks"):WaitForChild("MockCollectionService")),
 	}
 
 	Env.task = task
@@ -49,12 +52,15 @@ else
 		PluginSandbox = require("../../src/shared/PluginSandbox"),
 		Signal = require("../../src/shared/Utilities/Signal"),
 		Async = require("../../src/shared/Utilities/Async"),
+		EventBus = require("../../src/shared/Utilities/EventBus"),
+		Trove = require("../../src/shared/Utilities/Trove"),
 	}
 
 	Env.Mocks = {
 		MockRemoteEvent = require("./mocks/MockRemoteEvent"),
 		MockRemoteFunction = require("./mocks/MockRemoteFunction"),
 		MockPlayers = require("./mocks/MockPlayers"),
+		MockCollectionService = require("./mocks/MockCollectionService"),
 	}
 
 	local ok, luneTask = pcall(function()

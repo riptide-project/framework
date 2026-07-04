@@ -20,7 +20,7 @@ Instead of manually connecting to `Players.PlayerAdded` and `Players.PlayerRemov
 function MyService:OnPlayerAdded(Riptide: Riptide, player: Player)
 ```
 
-Called when a player joins the server. Also called **retroactively** for all players already connected at the time the module is loaded.
+Called when a player joins the server. Also called for all players already connected after the framework finishes module and plugin initialization.
 
 ```lua
 function CoinsService:OnPlayerAdded(Riptide, player)
@@ -29,17 +29,16 @@ function CoinsService:OnPlayerAdded(Riptide, player)
 end
 ```
 
-:::caution[Use the Riptide argument, not self fields]
-Retroactive `OnPlayerAdded` calls execute **before** the `Init` phase. This means any fields you set on `self` inside `Init` (like `self.State = Riptide.State`) are **not yet available** when the retroactive hook fires.
+:::note[Injected server API]
+`OnPlayerAdded` runs after module `Init`, so fields initialized in `Init` are available. The injected `Riptide` argument is already the server API, so autocomplete only exposes server-side methods.
 
-**Always use the `Riptide` argument directly** inside lifecycle hooks:
 ```lua
--- ✅ Safe — uses the Riptide argument directly
+-- ✅ Preferred
 function MyService:OnPlayerAdded(Riptide, player)
     Riptide.State:SetForPlayer(player, "coins", 100)
 end
 
--- ❌ Unsafe — self.State may be nil if called before Init
+-- Also valid if you assigned self.State in Init
 function MyService:OnPlayerAdded(Riptide, player)
     self.State:SetForPlayer(player, "coins", 100)
 end
@@ -47,7 +46,7 @@ end
 :::
 
 :::note
-Retroactive calls ensure that if a player connects before the framework finishes initializing, they still receive their `OnPlayerAdded` hook. No players are missed.
+Existing-player replay ensures that if a player connects before the framework finishes initializing, they still receive their `OnPlayerAdded` hook. No players are missed.
 :::
 
 ---
@@ -58,7 +57,7 @@ Retroactive calls ensure that if a player connects before the framework finishes
 function MyService:OnPlayerRemoving(Riptide: Riptide, player: Player)
 ```
 
-Called when a player is leaving the server (`Players.PlayerRemoving`). By this point, all modules have completed their `Init` and `Start` phases, so it is safe to read `self` fields here.
+Called when a player is leaving the server (`Players.PlayerRemoving`). By this point, all modules have completed `Init` and the start phase has been dispatched, so it is safe to read fields prepared during `Init`.
 
 ```lua
 function DataService:OnPlayerRemoving(Riptide, player)
@@ -76,16 +75,19 @@ end
 Server starts
     │
     ▼
-PlayerLifecycle:Start()                       ← retroactive OnPlayerAdded for existing players
+Init Phase (synchronous)                      ← self.* fields are set here
     │
     ▼
-Init Phase (synchronous)                      ← self.* fields are set here
+Plugin Start readiness barrier                ← framework extensions become ready before player replay
+    │
+    ▼
+PlayerLifecycle:Start()                       ← existing players replayed after plugin readiness
     │
     ▼
 Start Phase (task.spawn)                      ← game logic begins
     │
     ▼
-Players.PlayerAdded → OnPlayerAdded(...)      ← new players (Init is done, self.* is safe)
+Players.PlayerAdded → OnPlayerAdded(...)      ← new players
     │
     ▼
 Players.PlayerRemoving → OnPlayerRemoving(...)
@@ -95,7 +97,7 @@ StateReplication:_onPlayerRemoving(player)    ← automatic cleanup
 ```
 
 :::important
-For **retroactive** calls (players already connected at launch), hooks fire **before Init**. For players joining **after** launch, hooks fire **after** Init and Start. Always prefer the `Riptide` argument to be safe in both cases.
+Existing-player replay happens after module initialization and plugin Start dispatch, so lifecycle hooks can use fields prepared during `Init` and plugins can observe existing players.
 :::
 
 ---
@@ -123,7 +125,7 @@ If a hook throws an error, it is caught via `xpcall` and logged. **Other modules
 --!strict
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RiptidePkg = require(ReplicatedStorage.Packages.Riptide)
-type Riptide = RiptidePkg.Riptide
+type Riptide = RiptidePkg.RiptideServer
 
 local SessionService = {}
 
@@ -134,7 +136,7 @@ function SessionService:Init(Riptide: Riptide)
 end
 
 function SessionService:OnPlayerAdded(Riptide: Riptide, player: Player)
-    -- Use Riptide argument directly (safe for retroactive calls)
+    -- Existing-player replay runs after Init.
     self._sessions[player.UserId] = os.time()
     Riptide.State:SetForPlayer(player, "sessionStart", os.time())
 end

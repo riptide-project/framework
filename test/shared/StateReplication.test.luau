@@ -25,7 +25,7 @@ local StateReplication = Env.RiptideShared.StateReplication
 
 	Delta triggers use flat args: (scope, key, value, version).
 ]]
-local function createNetworkMock(isServer: boolean, snapshotResponse: any?)
+local function createNetworkMock(_isServer: boolean, snapshotResponse: any?)
 	local handlers = {} :: { [string]: { (...any) -> any } }
 	local SNAPSHOT = StateReplication.Events.Snapshot
 
@@ -44,7 +44,9 @@ local function createNetworkMock(isServer: boolean, snapshotResponse: any?)
 
 	function network.Unregister(name: string, callback: (...any) -> any)
 		local list = handlers[name]
-		if not list then return end
+		if not list then
+			return
+		end
 		for i, current in ipairs(list) do
 			if current == callback then
 				table.remove(list, i)
@@ -86,7 +88,9 @@ local function createNetworkMock(isServer: boolean, snapshotResponse: any?)
 	-- Use flat args for delta: network.Trigger(Delta, "global", "key", value, version)
 	function network.Trigger(name: string, ...: any)
 		local list = handlers[name]
-		if not list then return end
+		if not list then
+			return
+		end
 		local copy = table.clone(list)
 		for _, cb in ipairs(copy) do
 			cb(...)
@@ -164,6 +168,30 @@ return function()
 			check.equal(network._firedClient[2].args[3], 110) -- flat args[3] = value
 		end)
 
+		test.case("should expose typed server key proxies", function()
+			local network = createNetworkMock(true)
+			local mockPlayer = { UserId = 1, Name = "Player1" }
+
+			StateReplication:_init({
+				IsServer = true,
+				Network = network :: any,
+			})
+
+			local typedState = (StateReplication :: any).TypedServer()
+			typedState.coins:Set(100)
+			typedState.phase:SetForPlayer(mockPlayer, "Match")
+			local updatedCoins = typedState.coins:UpdateForPlayer(mockPlayer, function(oldValue)
+				return (oldValue or 0) + 25
+			end)
+
+			check.not_nil((StateReplication :: any).TypedServer)
+			check.equal((StateReplication :: any).TypedClient, nil)
+			check.equal(typedState.coins:Get(), 100)
+			check.equal(typedState.phase:Get(mockPlayer), "Match")
+			check.equal(updatedCoins, 125)
+			check.equal(typedState.coins:Get(mockPlayer), 125)
+		end)
+
 		test.case("should respond to snapshot request with FireClient", function()
 			local network = createNetworkMock(true)
 			local mockPlayer = { UserId = 1, Name = "Player1" }
@@ -187,6 +215,28 @@ return function()
 			local snapshot = snapshotFire.args[1] :: any
 			check.equal(snapshot.global.mapName, "Canyon")
 			check.equal(snapshot.player.coins, 999)
+		end)
+
+		test.case("should rate-limit repeated snapshot requests per player", function()
+			local network = createNetworkMock(true)
+			local mockPlayer = { UserId = 1, Name = "Player1" }
+			local otherPlayer = { UserId = 2, Name = "Player2" }
+
+			StateReplication:_init({
+				IsServer = true,
+				Network = network :: any,
+			})
+
+			network.Trigger(StateReplication.Events.Snapshot, mockPlayer)
+			network.Trigger(StateReplication.Events.Snapshot, mockPlayer)
+			check.equal(#network._firedClient, 1)
+
+			network.Trigger(StateReplication.Events.Snapshot, otherPlayer)
+			check.equal(#network._firedClient, 2)
+
+			StateReplication:_onPlayerRemoving(mockPlayer)
+			network.Trigger(StateReplication.Events.Snapshot, mockPlayer)
+			check.equal(#network._firedClient, 3)
 		end)
 
 		test.case("should cleanup per-player state when player leaves", function()
@@ -229,6 +279,38 @@ return function()
 			-- Player override wins over global
 			check.equal(StateReplication:Get("dayCycle"), "day")
 			check.equal(StateReplication:Get("coins"), 250)
+		end)
+
+		test.case("should expose typed client key proxies", function()
+			local snapshot = {
+				global = { phase = "Lobby", coins = 10 },
+				globalVersions = { phase = 1, coins = 1 },
+				player = { coins = 250 },
+				playerVersions = { coins = 5 },
+			}
+			local network = createNetworkMock(false, snapshot)
+
+			StateReplication:_init({
+				IsServer = false,
+				Network = network :: any,
+			})
+
+			local typedState = (StateReplication :: any).TypedClient()
+			local updates: { any } = {}
+			local unsubscribe = typedState.coins:Subscribe(function(value)
+				table.insert(updates, value)
+			end)
+
+			network.Trigger(StateReplication.Events.Delta, "player", "coins", 300, 6)
+
+			check.not_nil((StateReplication :: any).TypedClient)
+			check.equal((StateReplication :: any).TypedServer, nil)
+			check.equal(typedState.phase:Get(), "Lobby")
+			check.equal(typedState.coins:Get(), 300)
+			check.equal(updates[1], 250)
+			check.equal(updates[2], 300)
+
+			unsubscribe()
 		end)
 
 		test.case("should notify subscribers on flat-arg delta updates", function()
@@ -319,6 +401,51 @@ return function()
 			network.Trigger(StateReplication.Events.Delta, "global", "coins", 1, 3)
 
 			check.equal(StateReplication:Get("coins"), 100)
+		end)
+
+		test.case("should ignore malformed delta packets", function()
+			local snapshot = {
+				global = { coins = 100 },
+				globalVersions = { coins = 1 },
+				player = {},
+				playerVersions = {},
+			}
+			local network = createNetworkMock(false, snapshot)
+
+			StateReplication:_init({
+				IsServer = false,
+				Network = network :: any,
+			})
+
+			network.Trigger(StateReplication.Events.Delta, "global", "coins", 500, "bad version")
+			network.Trigger(StateReplication.Events.Delta, "bad-scope", "coins", 500, 2)
+			network.Trigger(StateReplication.Events.Delta, "global", 123, 500, 2)
+
+			check.equal(StateReplication:Get("coins"), 100)
+		end)
+
+		test.case("should sanitize malformed snapshot fields", function()
+			local snapshot = {
+				global = "not a table",
+				globalVersions = { coins = "bad version" },
+				player = {
+					coins = 250,
+					[123] = "ignored",
+				},
+				playerVersions = {
+					coins = 5,
+					badVersion = "ignored",
+				},
+			}
+			local network = createNetworkMock(false, snapshot)
+
+			StateReplication:_init({
+				IsServer = false,
+				Network = network :: any,
+			})
+
+			check.equal(StateReplication:Get("coins"), 250)
+			check.equal(StateReplication:Get("badVersion"), nil)
 		end)
 
 		test.case("should invoke initial Subscribe callback synchronously with current value", function()

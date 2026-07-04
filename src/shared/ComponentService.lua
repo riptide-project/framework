@@ -36,7 +36,30 @@ ComponentService._tagListeners = {} :: { [string]: { added: RBXScriptConnection,
 ComponentService._isStarted = false
 ComponentService._collectionService = nil
 
+local CleanupComponent: (self: ComponentServiceAPI, instance: Instance, tagName: string) -> ()
+
 function ComponentService:_init(deps: ComponentServiceDeps)
+	if self._isStarted then
+		self:_stop()
+	end
+
+	local cleanupEntries = {}
+	for instance, components in pairs(self._registry) do
+		for tagName in pairs(components) do
+			table.insert(cleanupEntries, {
+				instance = instance,
+				tagName = tagName,
+			})
+		end
+	end
+	for _, entry in ipairs(cleanupEntries) do
+		CleanupComponent(self, entry.instance, entry.tagName)
+	end
+
+	table.clear(self._registry)
+	table.clear(self._destroyingConns)
+	table.clear(self._tagListeners)
+	self._isStarted = false
 	self._collectionService = deps.CollectionService
 end
 
@@ -79,7 +102,7 @@ function ComponentService:Get(instance: Instance, tagName: string?): any?
 end
 
 -- Internal cleanup helper
-local function CleanupComponent(self: ComponentServiceAPI, instance: Instance, tagName: string)
+CleanupComponent = function(self: ComponentServiceAPI, instance: Instance, tagName: string)
 	local components = self._registry[instance]
 	if components then
 		local componentObj = components[tagName]
@@ -138,6 +161,43 @@ local function SetupComponent(
 	end
 end
 
+local function getCollectionService(self: ComponentServiceAPI): any
+	local cs = self._collectionService
+	if not cs then
+		cs = game:GetService("CollectionService")
+		self._collectionService = cs
+	end
+	return cs
+end
+
+local function RegisterTag(self: ComponentServiceAPI, tagName: string, ComponentClass: ComponentClass): boolean
+	if self._tagListeners[tagName] then
+		warn(string.format("[ComponentService] Tag '%s' is already registered — skipping.", tagName))
+		return false
+	end
+
+	local cs = getCollectionService(self)
+
+	local addedConn = cs:GetInstanceAddedSignal(tagName):Connect(function(instance: Instance)
+		SetupComponent(self, instance, tagName, ComponentClass)
+	end)
+
+	local removedConn = cs:GetInstanceRemovedSignal(tagName):Connect(function(instance: Instance)
+		CleanupComponent(self, instance, tagName)
+	end)
+
+	self._tagListeners[tagName] = {
+		added = addedConn,
+		removed = removedConn,
+	}
+
+	for _, instance in ipairs(cs:GetTagged(tagName)) do
+		SetupComponent(self, instance, tagName, ComponentClass)
+	end
+
+	return true
+end
+
 function ComponentService:_start(componentsFolder: Folder)
 	if self._isStarted then
 		warn("[ComponentService] _start called more than once. Ignoring duplicate start.")
@@ -145,13 +205,6 @@ function ComponentService:_start(componentsFolder: Folder)
 	end
 
 	self._isStarted = true
-
-	-- Use injected CollectionService, falling back to game:GetService for backward compat
-	local cs = self._collectionService
-	if not cs then
-		cs = game:GetService("CollectionService")
-		self._collectionService = cs
-	end
 
 	for _, moduleScript in ipairs(componentsFolder:GetDescendants()) do
 		if moduleScript:IsA("ModuleScript") then
@@ -179,22 +232,7 @@ function ComponentService:_start(componentsFolder: Folder)
 				continue
 			end
 
-			local addedConn = cs:GetInstanceAddedSignal(tagName):Connect(function(instance: Instance)
-				SetupComponent(self, instance, tagName, ComponentClass)
-			end)
-
-			local removedConn = cs:GetInstanceRemovedSignal(tagName):Connect(function(instance: Instance)
-				CleanupComponent(self, instance, tagName)
-			end)
-
-			self._tagListeners[tagName] = {
-				added = addedConn,
-				removed = removedConn,
-			}
-
-			for _, instance in ipairs(cs:GetTagged(tagName)) do
-				SetupComponent(self, instance, tagName, ComponentClass)
-			end
+			RegisterTag(self, tagName, ComponentClass)
 		end
 	end
 end
@@ -202,33 +240,7 @@ end
 --- Registers a single tag and its ComponentClass directly, without a folder scan.
 --- Used by PluginSandbox:RegisterComponent() so plugins don't need ComponentsFolder.
 function ComponentService:_registerTagManually(tagName: string, ComponentClass: ComponentClass)
-	if self._tagListeners[tagName] then
-		warn(string.format("[ComponentService] Tag '%s' is already registered — skipping.", tagName))
-		return
-	end
-
-	local cs = self._collectionService
-	if not cs then
-		cs = game:GetService("CollectionService")
-		self._collectionService = cs
-	end
-
-	local addedConn = cs:GetInstanceAddedSignal(tagName):Connect(function(instance: Instance)
-		SetupComponent(self, instance, tagName, ComponentClass)
-	end)
-
-	local removedConn = cs:GetInstanceRemovedSignal(tagName):Connect(function(instance: Instance)
-		CleanupComponent(self, instance, tagName)
-	end)
-
-	self._tagListeners[tagName] = {
-		added = addedConn,
-		removed = removedConn,
-	}
-
-	for _, instance in ipairs(cs:GetTagged(tagName)) do
-		SetupComponent(self, instance, tagName, ComponentClass)
-	end
+	RegisterTag(self, tagName, ComponentClass)
 end
 
 function ComponentService:UnregisterTag(tagName: string)
@@ -239,10 +251,15 @@ function ComponentService:UnregisterTag(tagName: string)
 		self._tagListeners[tagName] = nil
 	end
 
+	local instancesToCleanup = {}
 	for instance, components in pairs(self._registry) do
 		if components[tagName] then
-			CleanupComponent(self, instance, tagName)
+			table.insert(instancesToCleanup, instance)
 		end
+	end
+
+	for _, instance in ipairs(instancesToCleanup) do
+		CleanupComponent(self, instance, tagName)
 	end
 end
 

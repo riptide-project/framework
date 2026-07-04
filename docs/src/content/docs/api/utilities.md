@@ -82,30 +82,41 @@ Input validation: `maxAttempts` must be an integer ≥ 1, and `delay` must be no
 ### `Async.Parallel`
 
 ```lua
-Riptide.Async.Parallel(fns, timeout?) -> { any }
+Riptide.Async.Parallel(fns, timeout?) -> { AsyncResult<any> }
 ```
 
-Runs an array of zero-argument functions in parallel via `task.spawn` and waits for all to complete. Returns results in the same order as `fns`.
+Runs an array of zero-argument functions in parallel via `task.spawn` and waits for all to complete. Returns explicit result objects in the same order as `fns`.
+
+```lua
+type AsyncResult<T> = {
+    ok: boolean,
+    value: T?,
+    error: string?,
+    timedOut: boolean?,
+}
+```
 
 | Parameter  | Type        | Description                                         |
 |-----------|-------------|-----------------------------------------------------|
 | `fns`     | `{ () -> any }` | Array of functions to run.                       |
 | `timeout` | `number?`   | Max wait time in seconds. Defaults to **30**.       |
 
-If timeout expires before all functions complete, unfinished entries are `nil`.
+If timeout expires before all functions complete, unfinished entries return `{ ok = false, timedOut = true, error = "..." }`.
 
 ```lua
 local results = Riptide.Async.Parallel({
     function() return fetchPlayerData() end,
     function() return fetchInventory() end,
-    function() return fetchFriendsList() end,
+	    function() return fetchFriendsList() end,
 }, 10)
 
-local data, inventory, friends = results[1], results[2], results[3]
+if results[1].ok then
+    local data = results[1].value
+end
 ```
 
 :::caution
-If a function in the array throws an error, its result slot is `nil` — other functions continue executing normally.
+Maelstrom-2 changes the old `{ any }` return shape. Failed tasks and timed-out tasks no longer return `nil`; they return `{ ok = false, error = "..." }`. Successful `nil` is represented as `{ ok = true, value = nil }`.
 :::
 
 ---
@@ -343,13 +354,13 @@ Access via `Riptide.EventBus`.
 ### `EventBus.new`
 
 ```lua
-Riptide.EventBus.new() -> EventBus
+Riptide.EventBus.new(label: string?) -> EventBus
 ```
 
-Creates a new EventBus instance.
+Creates a new EventBus instance. `label` is optional and is used in listener error warnings.
 
 ```lua
-local bus = Riptide.EventBus.new()
+local bus = Riptide.EventBus.new("RoundBus")
 ```
 
 ### `EventBus:On`
@@ -367,6 +378,23 @@ end)
 
 -- Unsubscribe later:
 unsub()
+```
+
+### `EventBus:Once`
+
+```lua
+bus:Once(eventName: string, callback: (...any) -> ()) -> () -> ()
+```
+
+Registers a callback that runs only on the next emission for `eventName`, then unsubscribes itself. Returns an unsubscribe function so the one-shot listener can be cancelled before it fires.
+
+```lua
+local cancel = bus:Once("RoundStarted", function(roundId)
+    print("First round observed:", roundId)
+end)
+
+-- Optional cancellation before the event fires:
+cancel()
 ```
 
 ### `EventBus:Emit`
@@ -391,6 +419,18 @@ Removes all registered listeners from the EventBus instance.
 
 ```lua
 bus:Clear()
+```
+
+### `EventBus:Destroy`
+
+```lua
+bus:Destroy() -> ()
+```
+
+Cleanup-compatible alias for `Clear`. This lets an `EventBus` instance be passed to cleanup utilities that look for `Destroy`.
+
+```lua
+trove:Add(bus)
 ```
 
 ---

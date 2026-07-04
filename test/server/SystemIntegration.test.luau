@@ -48,8 +48,10 @@ return function()
 					return "B"
 				end,
 			}, 1)
-			check.equal(parallelResults[1], "A")
-			check.equal(parallelResults[2], "B")
+			check.equal(parallelResults[1].ok, true)
+			check.equal(parallelResults[1].value, "A")
+			check.equal(parallelResults[2].ok, true)
+			check.equal(parallelResults[2].value, "B")
 		end)
 
 		test.case("Network Engine Registration", function()

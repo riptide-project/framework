@@ -62,7 +62,13 @@ function StateMachine.new(config: StateMachineConfig): StateMachine
 	if initialStateDef and type(initialStateDef.OnEnter) == "function" then
 		local ok, err = xpcall(initialStateDef.OnEnter, debug.traceback, initialStateDef)
 		if not ok then
-			warn(string.format("[StateMachine] OnEnter error in initial state '%s':\n%s", self._currentStateName, tostring(err)))
+			warn(
+				string.format(
+					"[StateMachine] OnEnter error in initial state '%s':\n%s",
+					self._currentStateName,
+					tostring(err)
+				)
+			)
 		end
 	end
 
@@ -136,7 +142,9 @@ function StateMachine:Update(dt: number)
 	if currentStateDef and type(currentStateDef.OnUpdate) == "function" then
 		local ok, err = xpcall(currentStateDef.OnUpdate, debug.traceback, currentStateDef, dt)
 		if not ok then
-			warn(string.format("[StateMachine] OnUpdate error in state '%s':\n%s", self._currentStateName, tostring(err)))
+			warn(
+				string.format("[StateMachine] OnUpdate error in state '%s':\n%s", self._currentStateName, tostring(err))
+			)
 		end
 	end
 end
@@ -146,7 +154,13 @@ function StateMachine:Destroy()
 	if currentStateDef and type(currentStateDef.OnExit) == "function" then
 		local ok, err = xpcall(currentStateDef.OnExit, debug.traceback, currentStateDef)
 		if not ok then
-			warn(string.format("[StateMachine] OnExit error during Destroy for state '%s':\n%s", self._currentStateName, tostring(err)))
+			warn(
+				string.format(
+					"[StateMachine] OnExit error during Destroy for state '%s':\n%s",
+					self._currentStateName,
+					tostring(err)
+				)
+			)
 		end
 	end
 

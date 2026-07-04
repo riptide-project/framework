@@ -1,7 +1,11 @@
+--!strict
+
 local test_files = {
 	"../shared/Async.test",
 	"../shared/Chaos.test",
 	"../shared/ComponentService.test",
+	"../shared/DirectivePolicy.test",
+	"../shared/EventBus.test",
 	"../shared/ModuleLoader.test",
 	"../shared/Network.test",
 	"../shared/PlayerLifecycle.test",
@@ -10,6 +14,7 @@ local test_files = {
 	"../shared/Signal.test",
 	"../shared/StateMachine.test",
 	"../shared/StateReplication.test",
+	"../shared/Trove.test",
 }
 
 _G.TestEnv = require("../shared/TestEnv")

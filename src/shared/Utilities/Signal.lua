@@ -27,20 +27,20 @@ export type Connection = {
 	_thread: thread?,
 }
 
-export type Signal = {
+export type Signal<T... = ...any> = {
 	_head: Connection?,
-	Connect: (self: Signal, fn: (...any) -> ()) -> Connection,
-	Once: (self: Signal, fn: (...any) -> ()) -> Connection,
-	Fire: (self: Signal, ...any) -> (),
-	Wait: (self: Signal) -> ...any,
-	DisconnectAll: (self: Signal) -> (),
-	Destroy: (self: Signal) -> (),
+	Connect: (self: Signal<T...>, fn: (T...) -> ()) -> Connection,
+	Once: (self: Signal<T...>, fn: (T...) -> ()) -> Connection,
+	Fire: (self: Signal<T...>, T...) -> (),
+	Wait: (self: Signal<T...>) -> T...,
+	DisconnectAll: (self: Signal<T...>) -> (),
+	Destroy: (self: Signal<T...>) -> (),
 }
 
 local Connection = {}
 Connection.__index = Connection
 
-function Connection.new(signal: Signal, fn: (...any) -> ()): Connection
+function Connection.new(signal: Signal<...any>, fn: (...any) -> ()): Connection
 	local self = setmetatable({
 		Connected = true,
 		_signal = signal,
@@ -83,7 +83,7 @@ end
 local Signal = {}
 Signal.__index = Signal
 
-function Signal.new(): Signal
+function Signal.new<T...>(): Signal<T...>
 	local self = setmetatable({
 		_head = nil,
 	}, Signal)

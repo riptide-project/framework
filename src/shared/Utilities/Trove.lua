@@ -22,6 +22,11 @@ export type Trove = {
 		signal: SignalLike | SignalLikeMetatable | RBXScriptSignal,
 		fn: (...any) -> ...any
 	) -> ConnectionLike | ConnectionLikeMetatable,
+	Once: (
+		self: Trove,
+		signal: SignalLike | SignalLikeMetatable | RBXScriptSignal,
+		fn: (...any) -> ...any
+	) -> ConnectionLike | ConnectionLikeMetatable,
 	BindToRenderStep: (self: Trove, name: string, priority: number, fn: (dt: number) -> ()) -> (),
 	AddPromise: <T>(self: Trove, promise: (T & PromiseLike) | (T & PromiseLikeMetatable)) -> T,
 	Add: <T>(self: Trove, object: T & Trackable, cleanupMethod: string?) -> T,
@@ -54,7 +59,7 @@ export type Trackable =
 	| DestroyableLowercase
 	| DestroyableLowercaseMetatable
 	| Disconnectable
-	| DisconectableMetatable
+	| DisconnectableMetatable
 	| DisconnectableLowercase
 	| DisconnectableLowercaseMetatable
 	| SignalLike
@@ -119,7 +124,7 @@ type Disconnectable = {
 	Disconnect: (self: Disconnectable) -> (),
 }
 
-type DisconectableMetatable = typeof(setmetatable({}, {} :: { Disconnect: (self: DisconectableMetatable) -> () }))
+type DisconnectableMetatable = typeof(setmetatable({}, {} :: { Disconnect: (self: DisconnectableMetatable) -> () }))
 
 type DisconnectableLowercase = {
 	disconnect: (self: DisconnectableLowercase) -> (),
@@ -235,7 +240,7 @@ function Trove.Connect(
 	fn: (...any) -> ...any
 )
 	if self._cleaning then
-		error("Cannot call trove:Connect() while cleaning", 2)
+		error("Cannot call trove:Once() while cleaning", 2)
 	end
 	assertSignalLike(signal)
 
@@ -333,7 +338,10 @@ function Trove.Clean(self: TroveInternal)
 	self._cleaning = true
 
 	for _, obj in self._objects do
-		self:_cleanupObject(obj[1], obj[2])
+		local ok, err = xpcall(self._cleanupObject, debug.traceback, self, obj[1], obj[2])
+		if not ok then
+			warn(string.format("[Trove] Error while cleaning object: %s", tostring(err)))
+		end
 	end
 
 	table.clear(self._objects)

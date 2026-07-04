@@ -24,7 +24,7 @@ Pesde places Riptide inside `luau_packages/`. You reference it from your Rojo pr
 
 ```toml
 [dependencies]
-Riptide = "riptide/core@0.9.0-maelstrom.1"
+Riptide = "riptide/core@0.9.0-maelstrom.2"
 ```
 
 ### Manual Installation (.rbxm)
@@ -144,8 +144,8 @@ end
 
 --[[
     OnPlayerAdded(Riptide, player) — called when a player joins.
-    Also fires retroactively for players already in the server
-    at the moment Riptide launches.
+    Also replays for players already in the server after module
+    initialization and plugin readiness.
 ]]
 function HelloService:OnPlayerAdded(Riptide, player)
     print("Welcome, " .. player.Name .. "!")
@@ -165,7 +165,7 @@ return HelloService
 :::note[Colon vs. dot syntax]
 Lifecycle methods (`Init`, `Start`, `OnPlayerAdded`, `OnPlayerRemoving`) are called with **colon syntax** — `self` (your module table) is automatically the first argument, and `Riptide` is the second.
 
-Module lookup methods (`GetService`, `GetController`) are called with **dot syntax** — they are plain functions, not methods:
+Module lookup methods (`GetService`, `GetController`) are called with **dot syntax** — they are plain functions, not methods. Lifecycle hooks receive the side-specific Riptide API, so server services can call `Riptide.GetService` and client controllers can call `Riptide.GetController` directly:
 ```lua
 -- ✅ Correct
 local DataService = Riptide.GetService("DataService")
@@ -222,9 +222,9 @@ local ReplicatedStorage   = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 -- Require Riptide from the Packages folder
-local Riptide = require(ReplicatedStorage.Packages.Riptide)
+local Riptide = require(ReplicatedStorage.Packages.Riptide).Server
 
-Riptide.Server.Launch({
+Riptide.Launch({
     -- Required: the Folder containing your server Services
     ModulesFolder = ServerScriptService.Services,
 
@@ -243,9 +243,9 @@ Create `src/client/main.client.lua`:
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players           = game:GetService("Players")
 
-local Riptide = require(ReplicatedStorage.Packages.Riptide)
+local Riptide = require(ReplicatedStorage.Packages.Riptide).Client
 
-Riptide.Client.Launch({
+Riptide.Launch({
     -- Required: the Folder containing your client Controllers
     ModulesFolder = Players.LocalPlayer.PlayerScripts.Controllers,
 

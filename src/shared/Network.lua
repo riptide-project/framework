@@ -17,6 +17,7 @@ end
 
 type Callback = (...any) -> any
 type HandlerMap = { [string]: { Callback } }
+type TypedWrapperMap = { [string]: { [Callback]: Callback } }
 type GuardFunction = (any) -> (boolean, string?)
 type Middleware = (...any) -> any
 
@@ -30,7 +31,7 @@ export type NetworkDeps = {
 	UnreliableEventDispatcher: any,
 }
 
-export type NetworkAPI = {
+export type NetworkBaseAPI = {
 	_init: (deps: NetworkDeps) -> (),
 	Register: (funcName: string, callback: Callback) -> (),
 	RegisterTyped: (funcName: string, guards: { GuardFunction }, callback: Callback) -> (),
@@ -38,6 +39,40 @@ export type NetworkAPI = {
 	Unregister: (funcName: string, callback: Callback) -> (),
 	UseMiddleware: (scope: "server" | "client", middleware: Middleware) -> (),
 	ClearMiddlewares: (scope: ("server" | "client")?) -> (),
+}
+
+export type NetworkServerFireAPI = NetworkBaseAPI & {
+	FireClient: (player: Player, funcName: string, ...any) -> (),
+	FireAllClients: (funcName: string, ...any) -> (),
+	UnreliableFireClient: (player: Player, funcName: string, ...any) -> (),
+	UnreliableFireAllClients: (funcName: string, ...any) -> (),
+	FireServer: nil,
+	UnreliableFireServer: nil,
+}
+
+export type NetworkClientFireAPI = NetworkBaseAPI & {
+	FireClient: nil,
+	FireAllClients: nil,
+	UnreliableFireClient: nil,
+	UnreliableFireAllClients: nil,
+	FireServer: (funcName: string, ...any) -> (),
+	UnreliableFireServer: (funcName: string, ...any) -> (),
+}
+
+export type TypedServer<TEvents> = NetworkServerFireAPI & TEvents
+export type TypedClient<TEvents> = NetworkClientFireAPI & TEvents
+
+export type NetworkServerAPI = NetworkServerFireAPI & {
+	TypedServer: <TEvents>() -> TypedServer<TEvents>,
+	TypedClient: nil,
+}
+
+export type NetworkClientAPI = NetworkClientFireAPI & {
+	TypedServer: nil,
+	TypedClient: <TEvents>() -> TypedClient<TEvents>,
+}
+
+export type NetworkAPI = NetworkBaseAPI & {
 	-- Server-side fire APIs (nil on client)
 	FireClient: ((player: Player, funcName: string, ...any) -> ())?,
 	FireAllClients: ((funcName: string, ...any) -> ())?,
@@ -46,6 +81,8 @@ export type NetworkAPI = {
 	-- Client-side fire APIs (nil on server)
 	FireServer: ((funcName: string, ...any) -> ())?,
 	UnreliableFireServer: ((funcName: string, ...any) -> ())?,
+	TypedServer: (<TEvents>() -> TypedServer<TEvents>)?,
+	TypedClient: (<TEvents>() -> TypedClient<TEvents>)?,
 }
 
 -- ---------------------------------------------------------------------------
@@ -53,7 +90,7 @@ export type NetworkAPI = {
 -- ---------------------------------------------------------------------------
 
 local Handlers: HandlerMap = {}
-local TypedWrappers: { [Callback]: Callback } = {}
+local TypedWrappers: TypedWrapperMap = {}
 
 local EventDispatcher: any = nil
 local UnreliableEventDispatcher: any = nil
@@ -81,6 +118,43 @@ local function disconnectCurrentEventConnection()
 	UnreliableEventConnection = nil
 end
 
+local function getHandlersForIncomingEvent(funcName: any): { Callback }?
+	if type(funcName) ~= "string" then
+		warn(string.format("[Network] Ignoring packet with non-string event name: %s", typeof(funcName)))
+		return nil
+	end
+
+	return Handlers[funcName]
+end
+
+local function setTypedWrapper(funcName: string, callback: Callback, wrappedCallback: Callback)
+	local wrappersForEvent = TypedWrappers[funcName]
+	if not wrappersForEvent then
+		wrappersForEvent = {}
+		TypedWrappers[funcName] = wrappersForEvent
+	end
+	wrappersForEvent[callback] = wrappedCallback
+end
+
+local function getTypedWrapper(funcName: string, callback: Callback): Callback?
+	local wrappersForEvent = TypedWrappers[funcName]
+	if not wrappersForEvent then
+		return nil
+	end
+	return wrappersForEvent[callback]
+end
+
+local function clearTypedWrapper(funcName: string, callback: Callback)
+	local wrappersForEvent = TypedWrappers[funcName]
+	if not wrappersForEvent then
+		return
+	end
+	wrappersForEvent[callback] = nil
+	if next(wrappersForEvent) == nil then
+		TypedWrappers[funcName] = nil
+	end
+end
+
 --[[
 	runServerMiddlewareChain — flat for-loop, zero closure allocation.
 
@@ -93,12 +167,7 @@ end
 	The `args` table is passed by reference so middleware can mutate payload
 	in place without additional allocations.
 ]]
-local function runServerMiddlewareChain(
-	player: any,
-	funcName: string,
-	args: { any },
-	handlers: { Callback }
-)
+local function runServerMiddlewareChain(player: any, funcName: string, args: { any }, handlers: { Callback })
 	local mw = Middlewares.server
 	for i = 1, #mw do
 		local ok, result = xpcall(mw[i], debug.traceback, player, funcName, args)
@@ -127,11 +196,7 @@ end
 	Each middleware receives:
 	  (funcName, args: {any}) -> boolean
 ]]
-local function runClientMiddlewareChain(
-	funcName: string,
-	args: { any },
-	handlers: { Callback }
-)
+local function runClientMiddlewareChain(funcName: string, args: { any }, handlers: { Callback })
 	local mw = Middlewares.client
 	for i = 1, #mw do
 		local ok, result = xpcall(mw[i], debug.traceback, funcName, args)
@@ -157,6 +222,86 @@ end
 -- ---------------------------------------------------------------------------
 
 local Network = {} :: NetworkAPI
+local TypedServerProxy: any = nil
+local TypedClientProxy: any = nil
+
+local function createTypedServerProxy(): any
+	local eventCache: { [string]: Callback } = {}
+
+	return setmetatable({}, {
+		__index = function(_self, key: any)
+			local networkMember = (Network :: any)[key]
+			if networkMember ~= nil then
+				return networkMember
+			end
+
+			if type(key) ~= "string" then
+				return nil
+			end
+
+			local eventFn = eventCache[key]
+			if eventFn then
+				return eventFn
+			end
+
+			eventFn = function(player: Player, ...: any)
+				local fireClient = Network.FireClient
+				if not fireClient then
+					error("[Network.TypedServer] FireClient is not available outside server mode.", 2)
+				end
+				fireClient(player, key, ...)
+			end
+			eventCache[key] = eventFn
+			return eventFn
+		end,
+	})
+end
+
+local function createTypedClientProxy(): any
+	local eventCache: { [string]: Callback } = {}
+
+	return setmetatable({}, {
+		__index = function(_self, key: any)
+			local networkMember = (Network :: any)[key]
+			if networkMember ~= nil then
+				return networkMember
+			end
+
+			if type(key) ~= "string" then
+				return nil
+			end
+
+			local eventFn = eventCache[key]
+			if eventFn then
+				return eventFn
+			end
+
+			eventFn = function(...: any)
+				local fireServer = Network.FireServer
+				if not fireServer then
+					error("[Network.TypedClient] FireServer is not available outside client mode.", 2)
+				end
+				fireServer(key, ...)
+			end
+			eventCache[key] = eventFn
+			return eventFn
+		end,
+	})
+end
+
+local function typedServer<TEvents>(): TypedServer<TEvents>
+	if not TypedServerProxy then
+		TypedServerProxy = createTypedServerProxy()
+	end
+	return (TypedServerProxy :: any) :: TypedServer<TEvents>
+end
+
+local function typedClient<TEvents>(): TypedClient<TEvents>
+	if not TypedClientProxy then
+		TypedClientProxy = createTypedClientProxy()
+	end
+	return (TypedClientProxy :: any) :: TypedClient<TEvents>
+end
 
 function Network._init(deps: NetworkDeps)
 	if not deps then
@@ -185,39 +330,48 @@ function Network._init(deps: NetworkDeps)
 	table.clear(TypedWrappers)
 	table.clear(Middlewares.server)
 	table.clear(Middlewares.client)
+	TypedServerProxy = nil
+	TypedClientProxy = nil
 
 	if IS_SERVER then
-		EventConnection = EventDispatcher.OnServerEvent:Connect(function(player: Player, funcName: string, ...: any)
-			local handlers = Handlers[funcName]
-			if handlers then
-				if #Middlewares.server == 0 then
-					for _, handler in ipairs(handlers) do
-						local ok2, err = xpcall(handler, debug.traceback, player, ...)
-						if not ok2 then
-							warn(string.format("[Network] Handler error for '%s': %s", funcName, tostring(err)))
-						end
+		Network.TypedServer = typedServer
+		Network.TypedClient = nil
+
+		EventConnection = EventDispatcher.OnServerEvent:Connect(function(player: Player, funcName: any, ...: any)
+			local handlers = getHandlersForIncomingEvent(funcName)
+			if not handlers then
+				return
+			end
+
+			if #Middlewares.server == 0 then
+				for _, handler in ipairs(handlers) do
+					local ok2, err = xpcall(handler, debug.traceback, player, ...)
+					if not ok2 then
+						warn(string.format("[Network] Handler error for '%s': %s", funcName, tostring(err)))
 					end
-				else
-					runServerMiddlewareChain(player, funcName, { ... }, handlers)
 				end
+			else
+				runServerMiddlewareChain(player, funcName, { ... }, handlers)
 			end
 		end)
 
 		if UnreliableEventDispatcher ~= EventDispatcher then
 			UnreliableEventConnection = UnreliableEventDispatcher.OnServerEvent:Connect(
-				function(player: Player, funcName: string, ...: any)
-					local handlers = Handlers[funcName]
-					if handlers then
-						if #Middlewares.server == 0 then
-							for _, handler in ipairs(handlers) do
-								local ok2, err = xpcall(handler, debug.traceback, player, ...)
-								if not ok2 then
-									warn(string.format("[Network] Handler error for '%s': %s", funcName, tostring(err)))
-								end
+				function(player: Player, funcName: any, ...: any)
+					local handlers = getHandlersForIncomingEvent(funcName)
+					if not handlers then
+						return
+					end
+
+					if #Middlewares.server == 0 then
+						for _, handler in ipairs(handlers) do
+							local ok2, err = xpcall(handler, debug.traceback, player, ...)
+							if not ok2 then
+								warn(string.format("[Network] Handler error for '%s': %s", funcName, tostring(err)))
 							end
-						else
-							runServerMiddlewareChain(player, funcName, { ... }, handlers)
 						end
+					else
+						runServerMiddlewareChain(player, funcName, { ... }, handlers)
 					end
 				end
 			)
@@ -241,41 +395,47 @@ function Network._init(deps: NetworkDeps)
 			UnreliableEventDispatcher:FireAllClients(funcName, ...)
 		end
 
-		-- Clear client-side APIs to prevent cross-side leakage
 		Network.FireServer = nil
 		Network.UnreliableFireServer = nil
 	else
-		EventConnection = EventDispatcher.OnClientEvent:Connect(function(funcName: string, ...: any)
-			local handlers = Handlers[funcName]
-			if handlers then
-				if #Middlewares.client == 0 then
-					for _, handler in ipairs(handlers) do
-						local ok2, err = xpcall(handler, debug.traceback, ...)
-						if not ok2 then
-							warn(string.format("[Network] Handler error for '%s': %s", funcName, tostring(err)))
-						end
+		Network.TypedServer = nil
+		Network.TypedClient = typedClient
+
+		EventConnection = EventDispatcher.OnClientEvent:Connect(function(funcName: any, ...: any)
+			local handlers = getHandlersForIncomingEvent(funcName)
+			if not handlers then
+				return
+			end
+
+			if #Middlewares.client == 0 then
+				for _, handler in ipairs(handlers) do
+					local ok2, err = xpcall(handler, debug.traceback, ...)
+					if not ok2 then
+						warn(string.format("[Network] Handler error for '%s': %s", funcName, tostring(err)))
 					end
-				else
-					runClientMiddlewareChain(funcName, { ... }, handlers)
 				end
+			else
+				runClientMiddlewareChain(funcName, { ... }, handlers)
 			end
 		end)
 
 		if UnreliableEventDispatcher ~= EventDispatcher then
 			UnreliableEventConnection = UnreliableEventDispatcher.OnClientEvent:Connect(
-				function(funcName: string, ...: any)
-					local handlers = Handlers[funcName]
-					if handlers then
-						if #Middlewares.client == 0 then
-							for _, handler in ipairs(handlers) do
-								local ok2, err = xpcall(handler, debug.traceback, ...)
-								if not ok2 then
-									warn(string.format("[Network] Handler error for '%s': %s", funcName, tostring(err)))
-								end
+				function(funcName: any, ...: any)
+					local handlers = getHandlersForIncomingEvent(funcName)
+					if not handlers then
+						return
+					end
+
+					if #Middlewares.client == 0 then
+						for _, handler in ipairs(handlers) do
+							local ok2, err = xpcall(handler, debug.traceback, ...)
+							if not ok2 then
+								warn(string.format("[Network] Handler error for '%s': %s", funcName, tostring(err)))
 							end
-						else
-							runClientMiddlewareChain(funcName, { ... }, handlers)
 						end
+					else
+						runClientMiddlewareChain(funcName, { ... }, handlers)
 					end
 				end
 			)
@@ -291,7 +451,6 @@ function Network._init(deps: NetworkDeps)
 			UnreliableEventDispatcher:FireServer(funcName, ...)
 		end
 
-		-- Clear server-side APIs to prevent cross-side leakage
 		Network.FireClient = nil
 		Network.FireAllClients = nil
 		Network.UnreliableFireClient = nil
@@ -351,7 +510,14 @@ function Network.RegisterTyped(funcName: string, guards: { GuardFunction }, call
 			local val = args[i]
 			local ok, err = guard(val)
 			if not ok then
-				warn(string.format("[Network] Validation failed for event '%s' parameter %d: %s", funcName, i, tostring(err)))
+				warn(
+					string.format(
+						"[Network] Validation failed for event '%s' parameter %d: %s",
+						funcName,
+						i,
+						tostring(err)
+					)
+				)
 				return
 			end
 		end
@@ -359,7 +525,7 @@ function Network.RegisterTyped(funcName: string, guards: { GuardFunction }, call
 		callback(playerOrFirstArg, ...)
 	end
 
-	TypedWrappers[callback] = wrappedCallback
+	setTypedWrapper(funcName, callback, wrappedCallback)
 	Network.Register(funcName, wrappedCallback)
 end
 
@@ -368,7 +534,7 @@ function Network.RegisterTypedUnreliable(funcName: string, guards: { GuardFuncti
 end
 
 function Network.Unregister(funcName: string, callback: Callback)
-	local target = TypedWrappers[callback] or callback
+	local target = getTypedWrapper(funcName, callback) or callback
 	local handlers = Handlers[funcName]
 	if handlers then
 		for i, handler in ipairs(handlers) do
@@ -381,9 +547,7 @@ function Network.Unregister(funcName: string, callback: Callback)
 			Handlers[funcName] = nil
 		end
 	end
-	if TypedWrappers[callback] then
-		TypedWrappers[callback] = nil
-	end
+	clearTypedWrapper(funcName, callback)
 end
 
 function Network._clearHandlersForTests()

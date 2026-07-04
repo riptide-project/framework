@@ -4,10 +4,66 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## [Planned]
+## [0.9.0-maelstrom.2] - 2026-07-04
 
 ### Added
-- (New features arriving soon...)
+- **Side-specific framework surfaces** are now available through `Riptide.Server` and `Riptide.Client`. Each side exposes the API expected in that runtime, including `Launch`, `Network`, `State`, `Modules`, `Plugins`, `ComponentService`, `PlayerLifecycle`, `Signal`, `Async`, `Trove`, `EventBus`, and `Guard`.
+- **Side-specific lifecycle injection** now passes the active side API into module hooks. Services and controllers can use `Riptide.Network`, `Riptide.State`, and `Riptide.Plugins` inside `Init` / `Start` without repeating `Riptide.Server.*` or `Riptide.Client.*`.
+- **Typed Network proxies** now expose `Network.TypedServer<TEvents>()` and `Network.TypedClient<TEvents>()` for field-based event autocomplete while preserving dynamic string-name APIs.
+- **Typed State proxies** now expose `State.TypedServer<TSchema>()` and `State.TypedClient<TSchema>()` with `ServerKey<T>` / `ClientKey<T>` helpers for field-based state autocomplete.
+- **Plugin `Start` readiness** now supports `Descriptor.StartTimeout`, allowing infrastructure plugins to perform bounded startup work before player replay and game module `Start`.
+- **Plugin authoring types** now export `PluginPublicAPI`, `PluginDescriptor<TPublicAPI>`, `PluginHooks<TSandbox>`, and `PluginDefinition<TPublicAPI>`.
+- **EventBus lifecycle helpers** now include `EventBus:Once`, `EventBus:Destroy`, and optional warning labels via `EventBus.new(label?)`.
+- **Trove lifecycle helpers** now expose `Trove:Once` for one-shot signal tracking.
+- **Directive policy coverage** now enforces `--!strict` as the first directive in source and test files.
+
+### Changed
+- **Plugin lifecycle order** now treats plugins as framework extensions. Plugins load and initialize before game modules load, then plugin `Start` readiness completes before player lifecycle replay and game module `Start`.
+- **Plugin dependency handling** is now strict. Plugins with missing required dependencies are blocked, and dependents of blocked plugins are blocked as well.
+- **Plugin startup** now runs in dependency order and waits for each dependency's `Start` readiness before starting dependents.
+- **Plugin event bus dispatch** now reuses the shared `Utilities.EventBus` implementation instead of maintaining a separate internal bus implementation.
+- **Plugin sandbox permissions** now expose only the safe plugin bus subset: `Emit`, `On`, and `Once`. Framework-owned `Clear` / `Destroy` are intentionally not exposed to plugins.
+- **`Async.Parallel` result shape** now returns explicit result objects: `{ ok, value, error, timedOut? }`.
+- **README and package metadata** now use the current canary package version, SVG Roblox OSS badges, server/client launch examples, and cleaner Wally package exclusions.
+- **Documentation navigation** is now grouped into Start Here, Concepts, Examples, Migration, and API Reference.
+
+### Fixed
+- **Network typed handler cleanup** now tracks `RegisterTyped` wrappers per event name and callback, so reusing the same callback across typed events no longer leaves stale handlers after `Unregister`.
+- **Network packet dispatch** now rejects incoming packets whose event name is not a string on both server and client paths.
+- **Network unreliable typed events** now support typed registration through `RegisterTypedUnreliable`.
+- **StateReplication packet handling** now ignores malformed deltas and sanitizes malformed snapshot fields instead of allowing invalid network payloads to crash replication.
+- **StateReplication snapshot requests** are now rate-limited per player, and request cooldown state is cleared when players leave.
+- **StateReplication snapshot sync** now handles buffered deltas around snapshot application more defensively.
+- **ComponentService `_init`** now fully resets component registries, tag listeners, destroy connections, and started state before installing new dependencies.
+- **ComponentService `UnregisterTag`** now collects instances before cleanup, preventing registry mutation during iteration from skipping components.
+- **ComponentService tag registration** now uses one shared internal path for folder startup and plugin-driven registration.
+- **Trove cleanup** now continues cleaning remaining objects when one tracked cleanup method throws.
+- **Trove typing** now includes `Once`, and the disconnectable metatable typo plus the `Once` error message were corrected.
+- **Signal and EventBus exported types** now use stronger generic callback contracts to improve autocomplete and reduce public `any` leakage.
+- **PluginManager async lifecycle races** now use a generation token so stale `Start` tasks cannot restore `Running` after `_init`, `StopPlugins`, or `DestroyPlugins`.
+- **PluginManager player replay** now remembers players observed before a plugin reaches `Running` and replays `OnPlayerAdded` once startup completes.
+- **PluginManager player hook isolation** now marks crashing plugins `Errored` and cleans sandbox resources when `OnPlayerAdded` or `OnPlayerRemoving` throws.
+- **PluginManager errored destroy policy** now skips plugin `Destroy` hooks after a plugin has failed, while still force-cleaning sandbox resources.
+- **PluginManager snapshots** now return cloned `GetAllPlugins()` results to avoid leaking mutable internal registry tables.
+- **Roblox QA runners** now fail the overall run if a test module fails to require.
+- **DirectivePolicy Studio compatibility** now avoids requiring Lune-only filesystem APIs in Roblox Studio.
+
+### Breaking Changes
+- `Async.Parallel` no longer returns a plain result array. Each slot is now an explicit result object so successful `nil`, thrown errors, and timeouts are distinguishable.
+- Plugin lifecycle ordering changed: plugin load/init and bounded start readiness now happen before game module activation.
+- Normal plugin sandboxes no longer expose raw core event access such as `OnCoreEvent`; use namespaced plugin APIs instead.
+
+### Documentation
+- Added dedicated examples for server services, typed Network/State proxies, and framework plugins.
+- Added migration guides from `0.8.2` stable and `0.9.0-maelstrom.1`.
+- Updated lifecycle, plugin, network, state, utility, README, and package documentation for the current API shape.
+
+### Tests
+- Added coverage for Network hardening, StateReplication payload validation, ComponentService lifecycle cleanup, PluginManager readiness/crash behavior, Async explicit results, Trove cleanup, EventBus one-shot subscriptions, typed proxy autocomplete surfaces, and Luau directive policy.
+
+### Validation
+- **Lune QA** passes with `139/139` tests after the unified EventBus and plugin bus coverage.
+- **Roblox Studio QA** passes with `143/143` client tests and `144/144` server tests after the unified EventBus and plugin bus coverage.
 
 ## [0.9.0-maelstrom.1] - 2026-06-12
 
