@@ -53,6 +53,9 @@ jobs:
         with:
           version: '0.7.4'
           cache: false
+      - name: Install Pesde dependencies
+        if: matrix.registry == 'pesde'
+        run: pesde install
       - name: Publish package and verify acknowledgement
         env:
           REGISTRY_TOKEN: ${{ secrets[matrix.secret] }}

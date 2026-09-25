@@ -2,14 +2,41 @@
 """Publish one registry package, rejecting CLI failures that return exit code zero."""
 
 import argparse
+import json
 import os
 import re
 import subprocess
 import tomllib
 from pathlib import Path
+from urllib.error import URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def already_published(registry: str, package: dict, manifest: dict) -> bool:
+    index = package["registry"] if registry == "wally" else manifest["indices"]["default"]
+    parsed = urlparse(index)
+    parts = parsed.path.strip("/").split("/")
+    if parsed.scheme != "https" or parsed.netloc != "github.com" or len(parts) != 2:
+        raise SystemExit(f"Cannot check {registry} publication in index {index}.")
+    url = f"https://raw.githubusercontent.com/{parts[0]}/{parts[1]}/main/{package['name']}"
+    try:
+        with urlopen(Request(url, headers={"Cache-Control": "no-cache"}), timeout=20) as response:
+            data = response.read().decode("utf-8")
+    except (OSError, URLError) as error:
+        raise SystemExit(f"Cannot check {registry} publication in {url}: {error}") from error
+    if registry == "pesde":
+        target = manifest["target"]["environment"]
+        return f"{package['version']} {target}" in tomllib.loads(data)
+    return any(
+        (entry := json.loads(line))["package"]["name"] == package["name"]
+        and entry["package"]["version"] == package["version"]
+        for line in data.splitlines()
+        if line.strip()
+    )
 
 
 def acknowledged(registry: str, output: str, name: str, version: str) -> bool:
@@ -31,6 +58,9 @@ def publish(registry: str) -> None:
     with (ROOT / f"{registry}.toml").open("rb") as file:
         manifest = tomllib.load(file)
     package = manifest["package"] if registry == "wally" else manifest
+    if already_published(registry, package, manifest):
+        print(f"{registry} already contains {package['name']}@{package['version']}; skipping publication.")
+        return
     auth = [registry, "auth"] if registry == "pesde" else [registry]
     command = [registry, "publish"] + (["--yes"] if registry == "pesde" else [])
     try:

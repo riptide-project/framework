@@ -13,9 +13,37 @@ SPEC = importlib.util.spec_from_file_location(
 )
 publisher = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(publisher)
+check_index = publisher.already_published
 
 
 class PublicationTests(unittest.TestCase):
+    def setUp(self):
+        self.index_check = patch.object(publisher, "already_published", return_value=False)
+        self.index_check.start()
+        self.addCleanup(self.index_check.stop)
+
+    @patch.dict(os.environ, {"REGISTRY_TOKEN": "test-credential"})
+    def test_existing_package_skips_authentication_and_publish(self):
+        with patch.object(publisher, "already_published", return_value=True):
+            with patch.object(publisher.subprocess, "run") as run:
+                publisher.publish("wally")
+                run.assert_not_called()
+
+    def test_index_formats_identify_exact_published_version(self):
+        pesde = "['0.9.0-maelstrom.3 roblox']\npublished_at = 'today'\n"
+        wally = '{"package":{"name":"riptide/core","version":"0.9.0-maelstrom.3"}}\n'
+        with patch.object(publisher, "urlopen") as open_index:
+            open_index.return_value.__enter__.return_value.read.return_value = pesde.encode()
+            manifest = {"name": "riptide/core", "version": "0.9.0-maelstrom.3", "target": {"environment": "roblox"}, "indices": {"default": "https://github.com/pesde-pkg/index"}}
+            self.assertTrue(check_index("pesde", manifest, manifest))
+            manifest["version"] = "0.9.0-maelstrom.4"
+            self.assertFalse(check_index("pesde", manifest, manifest))
+            open_index.return_value.__enter__.return_value.read.return_value = wally.encode()
+            package = {"name": "riptide/core", "version": "0.9.0-maelstrom.3", "registry": "https://github.com/UpliftGames/wally-index"}
+            self.assertTrue(check_index("wally", package, {"package": package}))
+            package["version"] = "0.9.0-maelstrom.4"
+            self.assertFalse(check_index("wally", package, {"package": package}))
+
     def test_acknowledgements_require_the_expected_package(self):
         cases = [
             ("pesde", "\x1b[32mpublished riptide/core@1.2.3 roblox\x1b[0m\n", True),
