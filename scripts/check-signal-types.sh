@@ -33,7 +33,7 @@ if "${analyzer[@]}" ../test/types/SignalTypesInvalid.luau > typecheck/signal-neg
   echo "Negative Signal type fixture unexpectedly passed" >&2
   exit 1
 fi
-if [[ "$(rg -c 'TypeError:' typecheck/signal-negative.log)" != "5" ]]; then
+if [[ "$(grep -c 'TypeError:' typecheck/signal-negative.log)" != "5" ]]; then
   cat typecheck/signal-negative.log >&2
   echo "Expected five Signal type errors" >&2
   exit 1
