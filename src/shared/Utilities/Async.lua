@@ -2,9 +2,11 @@
 -- Riptide/Utilities/Async.lua
 -- Wrapper for yielding functions with timeout constraints, retries, and parallel execution
 
+type TaskLibrary = typeof(task)
 local task = task
 if not task then
-	task = require("@lune/task")
+	local loadTask: (string) -> TaskLibrary = require
+	task = loadTask("@lune/task")
 end
 export type AsyncResult<T> = {
 	ok: boolean,
@@ -31,17 +33,21 @@ local DEFAULT_PARALLEL_TIMEOUT = 30
 	@param ... The fallback value(s) to return if the execution times out.
 ]]
 function Async.Run(fn: (...any) -> ...any, timeout: number, ...: any): ...any
+	if type(timeout) ~= "number" or timeout < 0 or timeout >= math.huge or timeout ~= timeout then
+		error("[Async.Run] timeout must be a finite non-negative number.", 2)
+	end
 	local isYielding = false
 	local thread = coroutine.running()
 	local isFinished = false
 	local isTimedOut = false
+	local timeoutThread: thread? = nil
 
-	local fallbackArgs = { ... }
+	local fallbackArgs = table.pack(...)
 	local finalResults = nil
 
 	-- Run the target function asynchronously
 	task.spawn(function()
-		local results = { pcall(fn) }
+		local results = table.pack(pcall(fn))
 
 		-- If already timed out, discard results silently
 		if isTimedOut then
@@ -49,13 +55,17 @@ function Async.Run(fn: (...any) -> ...any, timeout: number, ...: any): ...any
 		end
 
 		isFinished = true
+		if timeoutThread then
+			task.cancel(timeoutThread)
+			timeoutThread = nil
+		end
 
 		if isYielding then
-			local success = table.remove(results, 1)
+			local success = results[1]
 			if success then
-				task.spawn(thread, true, table.unpack(results))
+				task.spawn(thread, true, table.unpack(results, 2, results.n))
 			else
-				task.spawn(thread, false, results[1])
+				task.spawn(thread, false, results[2])
 			end
 		else
 			finalResults = results
@@ -63,32 +73,33 @@ function Async.Run(fn: (...any) -> ...any, timeout: number, ...: any): ...any
 	end)
 
 	if isFinished then
-		local success = table.remove(finalResults, 1)
+		local success = finalResults[1]
 		if not success then
-			error(tostring(finalResults[1]), 2)
+			error(tostring(finalResults[2]), 2)
 		end
-		return table.unpack(finalResults)
+		return table.unpack(finalResults, 2, finalResults.n)
 	end
 
 	isYielding = true
 
 	-- Run the timeout watcher
-	task.delay(timeout, function()
+	timeoutThread = task.delay(timeout, function()
+		timeoutThread = nil
 		if not isFinished then
 			isTimedOut = true
 			isFinished = true
-			task.spawn(thread, true, table.unpack(fallbackArgs))
+			task.spawn(thread, true, table.unpack(fallbackArgs, 1, fallbackArgs.n))
 		end
 	end)
 
-	local yieldedResults = { coroutine.yield() }
-	local ok = table.remove(yieldedResults, 1)
+	local yieldedResults = table.pack(coroutine.yield())
+	local ok = yieldedResults[1]
 	if not ok then
 		-- Only throw underlying errors if the function failed before timing out
-		error(tostring(yieldedResults[1]), 2)
+		error(tostring(yieldedResults[2]), 2)
 	end
 
-	return table.unpack(yieldedResults)
+	return table.unpack(yieldedResults, 2, yieldedResults.n)
 end
 
 --[[
@@ -106,22 +117,22 @@ function Async.Retry(fn: (...any) -> ...any, maxAttempts: number, delay: number?
 		error("[Async.Retry] maxAttempts must be an integer >= 1.", 2)
 	end
 
-	if delay ~= nil and (type(delay) ~= "number" or delay < 0) then
+	if delay ~= nil and (type(delay) ~= "number" or delay < 0 or delay >= math.huge or delay ~= delay) then
 		error("[Async.Retry] delay must be a non-negative number when provided.", 2)
 	end
 
 	local lastError: string = ""
-	local args = { ... }
+	local args = table.pack(...)
 
 	for attempt = 1, maxAttempts do
-		local results = { pcall(fn, table.unpack(args)) }
-		local success = table.remove(results, 1)
+		local results = table.pack(pcall(fn, table.unpack(args, 1, args.n)))
+		local success = results[1]
 
 		if success then
-			return table.unpack(results)
+			return table.unpack(results, 2, results.n)
 		end
 
-		lastError = tostring(results[1])
+		lastError = tostring(results[2])
 
 		if attempt < maxAttempts then
 			local waitTime = delay or 0
@@ -150,13 +161,19 @@ function Async.Parallel(fns: { () -> any }, timeout: number?): { AsyncResult<any
 	local thread = coroutine.running()
 	local isYielding = false
 	local isDone = false
+	local timeoutThread: thread? = nil
 	local timeoutSeconds = timeout
 
 	if timeoutSeconds == nil then
 		timeoutSeconds = DEFAULT_PARALLEL_TIMEOUT
 	end
 
-	if timeoutSeconds < 0 then
+	if
+		type(timeoutSeconds) ~= "number"
+		or timeoutSeconds < 0
+		or timeoutSeconds >= math.huge
+		or timeoutSeconds ~= timeoutSeconds
+	then
 		error("[Async.Parallel] timeout must be a non-negative number.", 2)
 	end
 
@@ -183,6 +200,10 @@ function Async.Parallel(fns: { () -> any }, timeout: number?): { AsyncResult<any
 			remaining -= 1
 			if remaining == 0 and isYielding and not isDone then
 				isDone = true
+				if timeoutThread then
+					task.cancel(timeoutThread)
+					timeoutThread = nil
+				end
 				task.spawn(thread)
 			end
 		end)
@@ -196,7 +217,8 @@ function Async.Parallel(fns: { () -> any }, timeout: number?): { AsyncResult<any
 	isYielding = true
 
 	-- Timeout safety (defaulted when omitted)
-	task.delay(timeoutSeconds, function()
+	timeoutThread = task.delay(timeoutSeconds, function()
+		timeoutThread = nil
 		if not isDone then
 			for i = 1, count do
 				if not completed[i] then

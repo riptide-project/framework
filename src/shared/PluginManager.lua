@@ -9,9 +9,11 @@
 --   • Event Bus       : direct-call pub/sub with per-listener xpcall protection
 --   • Crash recovery  : CleanupAll via sandbox Trove, no Stop/Destroy on crash
 
+type TaskLibrary = typeof(task)
 local task = task
 if not task then
-	task = require("@lune/task")
+	local loadTask: (string) -> TaskLibrary = require
+	task = loadTask("@lune/task")
 end
 
 local PluginSandboxModule: any
@@ -156,7 +158,33 @@ export type PluginManagerAPI = {
 -- PluginManager state
 -- ---------------------------------------------------------------------------
 
-local PluginManager = {} :: PluginManagerAPI
+type PluginManagerInternal = {
+	_init: (self: PluginManagerInternal, deps: PluginManagerDeps) -> (),
+	LoadPlugins: (
+		self: PluginManagerInternal,
+		pluginsFolders: (Folder | { Folder })?,
+		externalPlugins: { { [string]: any } }?
+	) -> (),
+	InitPlugins: (self: PluginManagerInternal) -> (),
+	StartPlugins: (self: PluginManagerInternal) -> (),
+	StopPlugins: (self: PluginManagerInternal) -> (),
+	DestroyPlugins: (self: PluginManagerInternal) -> (),
+	GetPlugin: (self: PluginManagerInternal, name: string) -> PluginEntry?,
+	GetStatus: (self: PluginManagerInternal, name: string) -> PluginStatus?,
+	GetAllPlugins: (self: PluginManagerInternal) -> { [string]: PluginEntry },
+	NotifyPlayerAdded: (self: PluginManagerInternal, player: Player) -> (),
+	NotifyPlayerRemoving: (self: PluginManagerInternal, player: Player) -> (),
+
+	_plugins: { [string]: PluginEntry },
+	_loadOrder: { string },
+	_eventBus: typeof(EventBusModule.new()),
+	_deps: PluginManagerDeps?,
+	_isStarted: boolean,
+	_generation: number,
+	_knownPlayers: { Player },
+}
+
+local PluginManager = {} :: PluginManagerInternal
 PluginManager._plugins = {} :: { [string]: PluginEntry }
 PluginManager._loadOrder = {} :: { string } -- final sorted order
 PluginManager._eventBus = EventBusModule.new("🔌 [PluginEventBus]") :: any
@@ -171,7 +199,7 @@ local DEFAULT_PLUGIN_START_TIMEOUT = 5
 -- Section 1: _init
 -- ---------------------------------------------------------------------------
 
-function PluginManager:_init(deps: PluginManagerDeps)
+function PluginManager._init(self: PluginManagerInternal, deps: PluginManagerDeps)
 	assert(type(deps) == "table", "[PluginManager] _init requires a deps table.")
 	assert(deps.Network ~= nil, "[PluginManager] _init: deps.Network is required.")
 	assert(deps.State ~= nil, "[PluginManager] _init: deps.State is required.")
@@ -180,6 +208,7 @@ function PluginManager:_init(deps: PluginManagerDeps)
 	assert(deps.Async ~= nil, "[PluginManager] _init: deps.Async is required.")
 	assert(type(deps.IsServer) == "boolean", "[PluginManager] _init: deps.IsServer must be a boolean.")
 
+	self:DestroyPlugins()
 	self._deps = deps
 	self._plugins = {}
 	self._loadOrder = {}
@@ -209,7 +238,7 @@ local function createSandbox(self: any, pluginName: string): PluginSandboxAPI
 		PluginName = pluginName,
 		GetPluginAPI = function(name: string): PluginPublicAPI?
 			local entry: PluginEntry? = self._plugins[name]
-			if entry and entry.status ~= "Errored" then
+			if entry and entry.status ~= "Errored" and entry.status ~= "Destroyed" and entry.status ~= "Stopping" then
 				return entry.descriptor.PublicAPI
 			end
 			return nil
@@ -289,8 +318,31 @@ local function validatePlugin(
 
 	-- 8. Optional readiness timeout
 	if descriptor.StartTimeout ~= nil then
-		if type(descriptor.StartTimeout) ~= "number" or descriptor.StartTimeout <= 0 then
+		if
+			type(descriptor.StartTimeout) ~= "number"
+			or descriptor.StartTimeout <= 0
+			or descriptor.StartTimeout >= math.huge
+			or descriptor.StartTimeout ~= descriptor.StartTimeout
+		then
 			return nil, nil, string.format("'%s': Descriptor.StartTimeout must be a positive number.", name)
+		end
+	end
+
+	if descriptor.Dependencies ~= nil then
+		if type(descriptor.Dependencies) ~= "table" then
+			return nil, nil, string.format("'%s': Dependencies must be an array of names.", name)
+		end
+		for key, dependency in pairs(descriptor.Dependencies) do
+			if
+				type(key) ~= "number"
+				or key % 1 ~= 0
+				or key < 1
+				or key > #descriptor.Dependencies
+				or type(dependency) ~= "string"
+				or #dependency == 0
+			then
+				return nil, nil, string.format("'%s': Dependencies must be an array of names.", name)
+			end
 		end
 	end
 
@@ -417,7 +469,7 @@ end
 
 local function handleError(self: any, pluginName: string, phase: string, err: string)
 	local entry: PluginEntry? = self._plugins[pluginName]
-	if not entry then
+	if not entry or entry.status == "Errored" or entry.status == "Destroyed" then
 		return
 	end
 	entry.status = "Errored"
@@ -429,6 +481,27 @@ local function handleError(self: any, pluginName: string, phase: string, err: st
 	if not ok then
 		warn(string.format("🔌 [Plugin:%s] CleanupAll itself failed: %s", pluginName, tostring(cleanErr)))
 	end
+	for name, dependent in pairs(self._plugins) do
+		if table.find(dependent.descriptor.Dependencies or {}, pluginName) then
+			handleError(self, name, "Dependency", string.format("Required plugin '%s' failed.", pluginName))
+		end
+	end
+end
+
+local function dependenciesReady(self: any, entry: PluginEntry, requireRunning: boolean): boolean
+	for _, name in ipairs(entry.descriptor.Dependencies or {}) do
+		local dependency = self._plugins[name]
+		if
+			not dependency
+			or dependency.status == "Errored"
+			or dependency.status == "Destroyed"
+			or dependency.status == "Stopping"
+			or (requireRunning and dependency.status ~= "Running")
+		then
+			return false
+		end
+	end
+	return true
 end
 
 local function rememberPlayer(self: any, player: Player)
@@ -471,7 +544,9 @@ local function dispatchPlayerHook(
 			return
 		end
 
-		local ok, err = xpcall(hook, debug.traceback, entry.hooks, entry.sandbox, player)
+		local protectedResult = table.pack(xpcall(hook, debug.traceback, entry.hooks, entry.sandbox, player))
+
+		local ok, err = protectedResult[1], protectedResult[2]
 		if not isCurrentEntry(self, pluginName, entry, generation) then
 			return
 		end
@@ -524,7 +599,11 @@ local function gatherFromFolder(folder: Folder): { { [string]: any } }
 end
 
 --- Core LoadPlugins implementation.
-function PluginManager:LoadPlugins(pluginsFolders: (Folder | { Folder })?, externalPlugins: { { [string]: any } }?)
+function PluginManager.LoadPlugins(
+	self: PluginManagerInternal,
+	pluginsFolders: (Folder | { Folder })?,
+	externalPlugins: { { [string]: any } }?
+)
 	assert(self._deps ~= nil, "[PluginManager] LoadPlugins called before _init.")
 
 	local deps = self._deps :: PluginManagerDeps
@@ -633,7 +712,9 @@ function PluginManager:LoadPlugins(pluginsFolders: (Folder | { Folder })?, exter
 		table.insert(self._loadOrder, name)
 
 		if type(entry.hooks.OnRegister) == "function" then
-			local ok, err = xpcall(entry.hooks.OnRegister, debug.traceback, entry.hooks, entry.sandbox)
+			local protectedResult =
+				table.pack(xpcall(entry.hooks.OnRegister, debug.traceback, entry.hooks, entry.sandbox))
+			local ok, err = protectedResult[1], protectedResult[2]
 			if not ok then
 				handleError(self, name, "OnRegister", tostring(err))
 				-- Remove from load order so it won't Init/Start
@@ -659,18 +740,24 @@ end
 -- Section 8: InitPlugins — strictly synchronous, no yield allowed
 -- ---------------------------------------------------------------------------
 
-function PluginManager:InitPlugins()
+function PluginManager.InitPlugins(self: PluginManagerInternal)
 	assert(self._deps ~= nil, "[PluginManager] InitPlugins called before _init.")
 
 	for _, name in ipairs(self._loadOrder) do
 		local entry = self._plugins[name]
-		if not entry or entry.status == "Errored" then
+		if not entry or entry.status ~= "Registered" then
 			continue
 		end
 
+		if not dependenciesReady(self, entry, false) then
+			handleError(self, name, "Init", "Required dependency is unavailable.")
+			continue
+		end
 		entry.status = "Initializing"
 
-		local ok, err = xpcall(entry.hooks.Init, debug.traceback, entry.hooks, entry.sandbox)
+		local protectedResult = table.pack(xpcall(entry.hooks.Init, debug.traceback, entry.hooks, entry.sandbox))
+
+		local ok, err = protectedResult[1], protectedResult[2]
 
 		if not ok then
 			handleError(self, name, "Init", tostring(err))
@@ -685,20 +772,28 @@ end
 -- Section 9: StartPlugins — readiness barrier
 -- ---------------------------------------------------------------------------
 
-function PluginManager:StartPlugins()
+function PluginManager.StartPlugins(self: PluginManagerInternal)
 	assert(self._deps ~= nil, "[PluginManager] StartPlugins called before _init.")
 
+	if self._isStarted then
+		return
+	end
 	self._isStarted = true
 	self._generation += 1
 	local generation = self._generation
 
 	for _, name in ipairs(self._loadOrder) do
 		local entry = self._plugins[name]
-		if not entry or entry.status == "Errored" then
+		if not entry or entry.status ~= "Initializing" then
 			continue
 		end
 
 		if not isCurrentEntry(self, name, entry, generation) then
+			continue
+		end
+
+		if not dependenciesReady(self, entry, true) then
+			handleError(self, name, "Start", "Required dependency is not running.")
 			continue
 		end
 
@@ -716,8 +811,9 @@ function PluginManager:StartPlugins()
 			end
 		end
 
-		task.spawn(function()
-			local ok, err = xpcall(entry.hooks.Start, debug.traceback, entry.hooks, entry.sandbox)
+		local startThread = task.spawn(function()
+			local protectedResult = table.pack(xpcall(entry.hooks.Start, debug.traceback, entry.hooks, entry.sandbox))
+			local ok, err = protectedResult[1], protectedResult[2]
 
 			if completed then
 				return
@@ -729,7 +825,7 @@ function PluginManager:StartPlugins()
 			resumeWaitingThread()
 		end)
 
-		task.delay(timeoutSeconds, function()
+		local timeoutThread = task.delay(timeoutSeconds, function()
 			if completed then
 				return
 			end
@@ -745,11 +841,16 @@ function PluginManager:StartPlugins()
 			waiting = false
 		end
 
+		if not timedOut then
+			task.cancel(timeoutThread)
+		end
 		if not isCurrentEntry(self, name, entry, generation) then
+			pcall(task.cancel, startThread)
 			continue
 		end
 
 		if timedOut then
+			pcall(task.cancel, startThread)
 			handleError(self, name, "Start", string.format("Start timed out after %.2f seconds.", timeoutSeconds))
 		elseif not startOk then
 			handleError(self, name, "Start", tostring(startErr))
@@ -766,7 +867,7 @@ end
 -- Section 10: StopPlugins — sequential, reverse order
 -- ---------------------------------------------------------------------------
 
-function PluginManager:StopPlugins()
+function PluginManager.StopPlugins(self: PluginManagerInternal)
 	self._generation += 1
 	self._isStarted = false
 
@@ -781,11 +882,13 @@ function PluginManager:StopPlugins()
 		entry.status = "Stopping"
 
 		if type(entry.hooks.Stop) == "function" then
-			local ok, err = xpcall(entry.hooks.Stop, debug.traceback, entry.hooks, entry.sandbox)
+			local protectedResult = table.pack(xpcall(entry.hooks.Stop, debug.traceback, entry.hooks, entry.sandbox))
+			local ok, err = protectedResult[1], protectedResult[2]
 			if not ok then
 				warn(string.format("🔌 [Plugin:%s] ❌ Error in Stop phase:\n%s", name, tostring(err)))
 			end
 		end
+		entry.sandbox:CleanupAll()
 	end
 end
 
@@ -793,7 +896,7 @@ end
 -- Section 11: DestroyPlugins — sequential, reverse order; clears registry
 -- ---------------------------------------------------------------------------
 
-function PluginManager:DestroyPlugins()
+function PluginManager.DestroyPlugins(self: PluginManagerInternal)
 	self._generation += 1
 
 	local order = self._loadOrder
@@ -805,7 +908,8 @@ function PluginManager:DestroyPlugins()
 		end
 
 		if entry.status ~= "Errored" and type(entry.hooks.Destroy) == "function" then
-			local ok, err = xpcall(entry.hooks.Destroy, debug.traceback, entry.hooks, entry.sandbox)
+			local protectedResult = table.pack(xpcall(entry.hooks.Destroy, debug.traceback, entry.hooks, entry.sandbox))
+			local ok, err = protectedResult[1], protectedResult[2]
 			if not ok then
 				warn(string.format("🔌 [Plugin:%s] ❌ Error in Destroy phase:\n%s", name, tostring(err)))
 			end
@@ -837,7 +941,7 @@ end
 -- Section 12: Player lifecycle forwarding
 -- ---------------------------------------------------------------------------
 
-function PluginManager:NotifyPlayerAdded(player: Player)
+function PluginManager.NotifyPlayerAdded(self: PluginManagerInternal, player: Player)
 	rememberPlayer(self, player)
 
 	local generation = self._generation
@@ -850,7 +954,7 @@ function PluginManager:NotifyPlayerAdded(player: Player)
 	end
 end
 
-function PluginManager:NotifyPlayerRemoving(player: Player)
+function PluginManager.NotifyPlayerRemoving(self: PluginManagerInternal, player: Player)
 	forgetPlayer(self, player)
 
 	local generation = self._generation
@@ -870,20 +974,20 @@ end
 -- Section 13: Query API
 -- ---------------------------------------------------------------------------
 
-function PluginManager:GetPlugin(name: string): PluginEntry?
+function PluginManager.GetPlugin(self: PluginManagerInternal, name: string): PluginEntry?
 	return self._plugins[name]
 end
 
-function PluginManager:GetStatus(name: string): PluginStatus?
+function PluginManager.GetStatus(self: PluginManagerInternal, name: string): PluginStatus?
 	local entry = self._plugins[name]
 	return if entry then entry.status else nil
 end
 
-function PluginManager:GetAllPlugins(): { [string]: PluginEntry }
+function PluginManager.GetAllPlugins(self: PluginManagerInternal): { [string]: PluginEntry }
 	-- Return a shallow copy so callers can't mutate the registry
 	return table.clone(self._plugins)
 end
 
 -- ---------------------------------------------------------------------------
 
-return PluginManager
+return (PluginManager :: any) :: PluginManagerAPI

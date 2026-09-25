@@ -204,7 +204,7 @@ end
 PluginManagerModule:_init({
 	Network = NetworkModule,
 	State = StateReplicationModule,
-	Signal = SignalModule,
+	Signal = { new = SignalModule.new },
 	ComponentService = ComponentServiceModule,
 	IsServer = IS_SERVER,
 	Async = AsyncModule,

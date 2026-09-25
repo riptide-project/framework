@@ -21,6 +21,187 @@ end
 
 return function()
 	test.suite("ComponentService", function()
+		for _, cancellation in ipairs({ "unregister", "stop", "reset" }) do
+			test.case("yielding registration stops its replay after " .. cancellation, function()
+				local cs = MockCollectionService.new()
+				ComponentService:_init({ CollectionService = cs })
+				local first = createMockInstance("first")
+				local second = createMockInstance("second")
+				cs:AddTag(first, "Audit")
+				cs:AddTag(second, "Audit")
+				local created, destroyed = 0, 0
+				local registered = nil
+				local worker = coroutine.create(function()
+					registered = ComponentService:_registerTagManually("Audit", {
+						new = function()
+							created += 1
+							if created == 1 then
+								coroutine.yield()
+							end
+							return {
+								Destroy = function()
+									destroyed += 1
+								end,
+							}
+						end,
+					})
+				end)
+				assert(coroutine.resume(worker))
+				check.equal(created, 1)
+				if cancellation == "unregister" then
+					ComponentService:UnregisterTag("Audit")
+				elseif cancellation == "stop" then
+					ComponentService:_stop()
+				else
+					ComponentService:_init({ CollectionService = MockCollectionService.new() })
+				end
+				assert(coroutine.resume(worker))
+				check.equal(coroutine.status(worker), "dead")
+				check.equal(registered, false)
+				check.equal(created, 1)
+				check.equal(destroyed, 1)
+				check.equal(ComponentService:Get(first, "Audit"), nil)
+				check.equal(ComponentService:Get(second, "Audit"), nil)
+				check.equal(next(ComponentService._destroyingConns), nil)
+				ComponentService:_stop()
+			end)
+		end
+
+		test.case("cancelled registration cannot claim a replacement with the same tag", function()
+			local cs = MockCollectionService.new()
+			ComponentService:_init({ CollectionService = cs })
+			local instance = createMockInstance("replaced")
+			cs:AddTag(instance, "Audit")
+			local destroyedOld, destroyedNew = 0, 0
+			local registered = nil
+			local replacement = {
+				Destroy = function()
+					destroyedNew += 1
+				end,
+			}
+			local worker = coroutine.create(function()
+				registered = ComponentService:_registerTagManually("Audit", {
+					new = function()
+						coroutine.yield()
+						return {
+							Destroy = function()
+								destroyedOld += 1
+							end,
+						}
+					end,
+				})
+			end)
+			assert(coroutine.resume(worker))
+			ComponentService:UnregisterTag("Audit")
+			check.equal(
+				ComponentService:_registerTagManually("Audit", {
+					new = function()
+						return replacement
+					end,
+				}),
+				true
+			)
+			assert(coroutine.resume(worker))
+			check.equal(registered, false)
+			check.equal(ComponentService:Get(instance, "Audit"), replacement)
+			check.equal(destroyedOld, 1)
+			check.equal(destroyedNew, 0)
+			ComponentService:_stop()
+			check.equal(destroyedNew, 1)
+		end)
+
+		test.case("tag replay skips instances removed while another constructor yields", function()
+			local cs = MockCollectionService.new()
+			ComponentService:_init({ CollectionService = cs })
+			local first = createMockInstance("first")
+			local removed = createMockInstance("removed")
+			cs:AddTag(first, "Audit")
+			cs:AddTag(removed, "Audit")
+			local created = 0
+			local registered = nil
+			local worker = coroutine.create(function()
+				registered = ComponentService:_registerTagManually("Audit", {
+					new = function()
+						created += 1
+						if created == 1 then
+							coroutine.yield()
+						end
+						return {}
+					end,
+				})
+			end)
+			assert(coroutine.resume(worker))
+			cs:RemoveTag(removed, "Audit")
+			assert(coroutine.resume(worker))
+			check.equal(registered, true)
+			check.equal(created, 1)
+			check.equal(ComponentService:Get(removed, "Audit"), nil)
+			ComponentService:_stop()
+		end)
+
+		test.case("reinitialization disconnects manually registered tags", function()
+			local cs = MockCollectionService.new()
+			ComponentService:_init({ CollectionService = cs })
+			local count = 0
+			ComponentService:_registerTagManually("Audit", {
+				new = function()
+					count += 1
+					return {}
+				end,
+			})
+			ComponentService:_init({ CollectionService = MockCollectionService.new() })
+			cs:AddTag(createMockInstance("late"), "Audit")
+			check.equal(count, 0)
+			ComponentService:_stop()
+		end)
+
+		test.case("tag removal during constructor does not resurrect a component", function()
+			local cs = MockCollectionService.new()
+			ComponentService:_init({ CollectionService = cs })
+			local instance = createMockInstance("removed")
+			local destroyed = 0
+			ComponentService:_registerTagManually("Audit", {
+				new = function()
+					cs:RemoveTag(instance, "Audit")
+					return {
+						Destroy = function()
+							destroyed += 1
+						end,
+					}
+				end,
+			})
+			cs:AddTag(instance, "Audit")
+			check.equal(ComponentService:Get(instance, "Audit"), nil)
+			check.equal(destroyed, 1)
+			ComponentService:_stop()
+		end)
+
+		test.case("Destroy may re-add a tag without losing the replacement cleanup", function()
+			local cs = MockCollectionService.new()
+			ComponentService:_init({ CollectionService = cs })
+			local instance = createMockInstance("reentrant")
+			local created, destroyed = 0, 0
+			ComponentService:_registerTagManually("Audit", {
+				new = function()
+					created += 1
+					return {
+						Destroy = function()
+							destroyed += 1
+							if destroyed == 1 then
+								cs:AddTag(instance, "Audit")
+							end
+						end,
+					}
+				end,
+			})
+			cs:AddTag(instance, "Audit")
+			cs:RemoveTag(instance, "Audit")
+			check.equal(created, 2)
+			instance.Destroying:Fire()
+			check.equal(destroyed, 2)
+			ComponentService:_stop()
+		end)
+
 		test.case("should link tags to component wrappers via Get", function()
 			-- Reset state
 			local cs = ComponentService :: any

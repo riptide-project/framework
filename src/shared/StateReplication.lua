@@ -4,25 +4,33 @@
 --
 -- DESIGN CONTRACT (v0.9.0):
 --   • Snapshot sync: fire-and-respond handshake over RemoteEvents.
---     Client fires EVENT_SNAPSHOT (request) → server fires back snapshot payload.
+--     Client fires EVENT_SNAPSHOT (request id) → server echoes it in the snapshot.
 --     No InvokeServer / RemoteFunction required.
 --   • notify() is synchronous — subscriber callbacks must not yield.
 --   • Delta packets use flat RemoteEvent args (scope, key, value, version)
 --     to avoid one table allocation per Set() call.
 
+type TaskLibrary = typeof(task)
+local task = task
+if not task then
+	local loadTask: (string) -> TaskLibrary = require
+	task = loadTask("@lune/task")
+end
+
 type Callback = (value: any) -> ()
 
 type NetworkLike = {
-	Register: (funcName: string, callback: (...any) -> any) -> (),
-	Unregister: (funcName: string, callback: (...any) -> any) -> (),
-	FireAllClients: ((funcName: string, ...any) -> ())?,
-	FireClient: ((player: any, funcName: string, ...any) -> ())?,
-	FireServer: ((funcName: string, ...any) -> ())?,
+	_registerInternal: (funcName: string, callback: (...any) -> ...any) -> (),
+	_unregisterInternal: (funcName: string, callback: (...any) -> ...any) -> (),
+	_fireInternalAllClients: ((funcName: string, ...any) -> ())?,
+	_fireInternalClient: ((player: any, funcName: string, ...any) -> ())?,
+	_fireInternalServer: ((funcName: string, ...any) -> ())?,
 }
 
 export type StateReplicationDeps = {
 	IsServer: boolean,
 	Network: NetworkLike,
+	SyncTimeout: number?,
 }
 
 export type StateReplicationEvents = {
@@ -95,6 +103,11 @@ export type StateReplicationAPI = {
 local EVENT_DELTA = "__riptide_state_delta"
 local EVENT_SNAPSHOT = "__riptide_state_snapshot"
 local SNAPSHOT_REQUEST_COOLDOWN_SECONDS = 1
+local DEFAULT_SYNC_TIMEOUT = 10
+
+local function validVersion(value: any): boolean
+	return type(value) == "number" and value > 0 and value < math.huge and value % 1 == 0
+end
 
 local function shallowCopy(source: { [string]: any }): { [string]: any }
 	return table.clone(source)
@@ -146,7 +159,7 @@ local function isValidDelta(scope: any, key: any, version: any): boolean
 		warn(string.format("[StateReplication] Ignoring malformed delta with non-string key: %s", typeof(key)))
 		return false
 	end
-	if type(version) ~= "number" or version ~= version then
+	if not validVersion(version) then
 		warn(string.format("[StateReplication] Ignoring malformed delta with invalid version: %s", tostring(version)))
 		return false
 	end
@@ -177,7 +190,7 @@ end
 
 local function applySnapshotVersions(target: { [string]: number }, source: { [any]: any })
 	for k, v in pairs(source) do
-		if type(k) == "string" and type(v) == "number" and v == v then
+		if type(k) == "string" and validVersion(v) then
 			target[k] = v
 		else
 			warn("[StateReplication] Ignoring malformed snapshot version entry.")
@@ -215,7 +228,43 @@ end
 
 -- ---------------------------------------------------------------------------
 
-local StateReplication = {} :: StateReplicationAPI
+type StateReplicationInternal = {
+	Events: StateReplicationEvents,
+	_init: (self: StateReplicationInternal, deps: StateReplicationDeps) -> (),
+	Set: (self: StateReplicationInternal, key: string, value: any) -> (),
+	SetForPlayer: (self: StateReplicationInternal, player: any, key: string, value: any) -> (),
+	UpdateForPlayer: (self: StateReplicationInternal, player: any, key: string, updater: (oldValue: any) -> any) -> any,
+	Get: (self: StateReplicationInternal, key: string, player: any?) -> any,
+	Subscribe: (self: StateReplicationInternal, key: string, callback: Callback) -> () -> (),
+	RequestSync: (self: StateReplicationInternal) -> boolean,
+	_onPlayerRemoving: (self: StateReplicationInternal, player: any) -> (),
+	TypedServer: (<TSchema>() -> TypedServer<TSchema>)?,
+	TypedClient: (<TSchema>() -> TypedClient<TSchema>)?,
+
+	_initialized: boolean,
+	_isServer: boolean,
+	_network: NetworkLike?,
+	_globalState: { [string]: any },
+	_globalVersions: { [string]: number },
+	_playerState: { [any]: { [string]: any } },
+	_playerVersions: { [any]: { [string]: number } },
+	_clientGlobalState: { [string]: any },
+	_clientGlobalVersions: { [string]: number },
+	_clientPlayerState: { [string]: any },
+	_clientPlayerVersions: { [string]: number },
+	_syncYielding: boolean,
+	_syncBuffer: { { any } },
+	_syncTimer: thread?,
+	_syncTimeout: number,
+	_nextRequestId: number?,
+	_subscribers: { [string]: { Callback }? },
+	_deltaHandler: ((...any) -> ...any)?,
+	_snapshotHandler: ((...any) -> ...any)?,
+	_snapshotRequestTimes: { [any]: number },
+	_snapshotRetryResponseTimes: { [any]: number },
+}
+
+local StateReplication = {} :: StateReplicationInternal
 local TypedServerProxy: any = nil
 local TypedClientProxy: any = nil
 
@@ -239,13 +288,14 @@ StateReplication._clientPlayerState = {} :: { [string]: any }
 StateReplication._clientPlayerVersions = {} :: { [string]: number }
 
 StateReplication._syncYielding = false
--- Each entry: { scope, key, value, version } — buffered during initial sync.
+-- Kept empty for diagnostics; deltas now apply immediately, even during sync.
 StateReplication._syncBuffer = {} :: { { any } }
 
 StateReplication._subscribers = {} :: { [string]: { Callback } }
-StateReplication._deltaHandler = nil :: ((...any) -> any)?
-StateReplication._snapshotHandler = nil :: ((...any) -> any)?
+StateReplication._deltaHandler = nil :: ((...any) -> ...any)?
+StateReplication._snapshotHandler = nil :: ((...any) -> ...any)?
 StateReplication._snapshotRequestTimes = {} :: { [any]: number }
+StateReplication._snapshotRetryResponseTimes = {} :: { [any]: number }
 
 local function createServerKeyProxy(key: string): any
 	return {
@@ -342,11 +392,15 @@ local function typedClient<TSchema>(): TypedClient<TSchema>
 end
 
 local function resetState(self: any)
+	if self._syncTimer then
+		task.cancel(self._syncTimer)
+		self._syncTimer = nil
+	end
 	if self._network and self._deltaHandler then
-		self._network.Unregister(EVENT_DELTA, self._deltaHandler)
+		self._network._unregisterInternal(EVENT_DELTA, self._deltaHandler)
 	end
 	if self._network and self._snapshotHandler then
-		self._network.Unregister(EVENT_SNAPSHOT, self._snapshotHandler)
+		self._network._unregisterInternal(EVENT_SNAPSHOT, self._snapshotHandler)
 	end
 
 	self._initialized = false
@@ -364,6 +418,7 @@ local function resetState(self: any)
 	table.clear(self._subscribers)
 	table.clear(self._syncBuffer)
 	table.clear(self._snapshotRequestTimes)
+	table.clear(self._snapshotRetryResponseTimes)
 	self._syncYielding = false
 	TypedServerProxy = nil
 	TypedClientProxy = nil
@@ -374,7 +429,7 @@ local function resetState(self: any)
 	self._playerVersions = {}
 end
 
-function StateReplication:_init(deps: StateReplicationDeps)
+function StateReplication._init(self: StateReplicationInternal, deps: StateReplicationDeps)
 	if not deps then
 		error("[StateReplication] _init requires a deps table.", 2)
 	end
@@ -385,69 +440,89 @@ function StateReplication:_init(deps: StateReplicationDeps)
 		error("[StateReplication] _init requires deps.Network.", 2)
 	end
 
+	local syncTimeout = deps.SyncTimeout or DEFAULT_SYNC_TIMEOUT
+	if type(syncTimeout) ~= "number" or syncTimeout <= 0 or syncTimeout >= math.huge or syncTimeout ~= syncTimeout then
+		error("[StateReplication] SyncTimeout must be a finite positive number.", 2)
+	end
 	if self._initialized then
 		resetState(self)
 	end
 
+	self._syncTimeout = syncTimeout
 	self._isServer = deps.IsServer
 	self._network = deps.Network
 	self._initialized = true
 
 	if self._isServer then
-		self.TypedServer = typedServer
+		-- Preserve the generic factory at the optional API boundary.
+		self.TypedServer = typedServer :: any
 		self.TypedClient = nil
 
-		-- SERVER: respond to client snapshot requests.
-		-- Protocol: client fires EVENT_SNAPSHOT (no args) → server fires back
-		--           one structured snapshot table to that specific client.
-		self._snapshotHandler = function(player: any)
+		self._snapshotHandler = function(player: any, requestId: any)
 			if player == nil then
 				warn("[StateReplication] Ignoring snapshot request without a player.")
 				return
 			end
+			if requestId ~= nil and not validVersion(requestId) then
+				return
+			end
 			local net = self._network
-			if not (net and net.FireClient) then
+			if not (net and net._fireInternalClient) then
 				return
 			end
 
 			local now = os.clock()
 			local lastRequestTime = self._snapshotRequestTimes[player]
 			if lastRequestTime ~= nil and now - lastRequestTime < SNAPSHOT_REQUEST_COOLDOWN_SECONDS then
+				local lastRetryResponseTime = self._snapshotRetryResponseTimes[player]
+				if
+					requestId ~= nil
+					and (
+						lastRetryResponseTime == nil
+						or now - lastRetryResponseTime >= SNAPSHOT_REQUEST_COOLDOWN_SECONDS
+					)
+				then
+					self._snapshotRetryResponseTimes[player] = now
+					local fireClient = net._fireInternalClient :: any
+					fireClient(player, EVENT_SNAPSHOT, {
+						requestId = requestId,
+						retryAfter = SNAPSHOT_REQUEST_COOLDOWN_SECONDS - (now - lastRequestTime),
+					})
+				end
 				return
 			end
 			self._snapshotRequestTimes[player] = now
+			self._snapshotRetryResponseTimes[player] = nil
 
 			local playerState = self._playerState[player] or {}
 			local playerVersions = self._playerVersions[player] or {}
-			(net.FireClient :: any)(player, EVENT_SNAPSHOT, {
+			(net._fireInternalClient :: any)(player, EVENT_SNAPSHOT, {
+				requestId = requestId,
 				global = shallowCopy(self._globalState),
 				globalVersions = shallowCopy(self._globalVersions),
 				player = shallowCopy(playerState),
 				playerVersions = shallowCopy(playerVersions),
 			})
 		end
-		self._network.Register(EVENT_SNAPSHOT, self._snapshotHandler)
+		deps.Network._registerInternal(EVENT_SNAPSHOT, self._snapshotHandler :: (...any) -> ...any)
 	else
 		self.TypedServer = nil
-		self.TypedClient = typedClient
+		-- Preserve the generic factory at the optional API boundary.
+		self.TypedClient = typedClient :: any
 
-		-- CLIENT: receive flat-arg delta packets and buffer them during sync.
+		-- CLIENT: apply live deltas during sync; snapshot versions prevent rollback.
 		self._deltaHandler = function(scope: any, key: any, value: any, version: any)
 			if not isValidDelta(scope, key, version) then
 				return
 			end
-			if self._syncYielding then
-				table.insert(self._syncBuffer, { scope, key, value, version })
-			else
-				applyClientDelta(self, scope, key, value, version)
-			end
+			applyClientDelta(self, scope, key, value, version)
 		end
-		self._network.Register(EVENT_DELTA, self._deltaHandler)
+		deps.Network._registerInternal(EVENT_DELTA, self._deltaHandler :: (...any) -> ...any)
 		self:RequestSync()
 	end
 end
 
-function StateReplication:Set(key: string, value: any)
+function StateReplication.Set(self: StateReplicationInternal, key: string, value: any)
 	ensureServer(self)
 	if type(key) ~= "string" then
 		error("[StateReplication] Set requires key as string.", 2)
@@ -458,12 +533,12 @@ function StateReplication:Set(key: string, value: any)
 	self._globalState[key] = value
 
 	-- FLAT ARGS: no table allocation per call.
-	if self._network and self._network.FireAllClients then
-		self._network.FireAllClients(EVENT_DELTA, "global", key, value, nextVersion)
+	if self._network and self._network._fireInternalAllClients then
+		self._network._fireInternalAllClients(EVENT_DELTA, "global", key, value, nextVersion)
 	end
 end
 
-function StateReplication:SetForPlayer(player: any, key: string, value: any)
+function StateReplication.SetForPlayer(self: StateReplicationInternal, player: any, key: string, value: any)
 	ensureServer(self)
 	if player == nil then
 		error("[StateReplication] SetForPlayer requires player.", 2)
@@ -487,12 +562,17 @@ function StateReplication:SetForPlayer(player: any, key: string, value: any)
 	playerState[key] = value
 
 	-- FLAT ARGS: no table allocation per call.
-	if self._network and self._network.FireClient then
-		(self._network.FireClient :: any)(player, EVENT_DELTA, "player", key, value, nextVersion)
+	if self._network and self._network._fireInternalClient then
+		(self._network._fireInternalClient :: any)(player, EVENT_DELTA, "player", key, value, nextVersion)
 	end
 end
 
-function StateReplication:UpdateForPlayer(player: any, key: string, updater: (oldValue: any) -> any): any
+function StateReplication.UpdateForPlayer(
+	self: StateReplicationInternal,
+	player: any,
+	key: string,
+	updater: (oldValue: any) -> any
+): any
 	ensureServer(self)
 	if player == nil then
 		error("[StateReplication] UpdateForPlayer requires player.", 2)
@@ -510,7 +590,7 @@ function StateReplication:UpdateForPlayer(player: any, key: string, updater: (ol
 	return newValue
 end
 
-function StateReplication:Get(key: string, player: any?): any
+function StateReplication.Get(self: StateReplicationInternal, key: string, player: any?): any
 	if type(key) ~= "string" then
 		error("[StateReplication] Get requires key as string.", 2)
 	end
@@ -528,7 +608,7 @@ function StateReplication:Get(key: string, player: any?): any
 	return getClientResolvedValue(self, key)
 end
 
-function StateReplication:Subscribe(key: string, callback: Callback): () -> ()
+function StateReplication.Subscribe(self: StateReplicationInternal, key: string, callback: Callback): () -> ()
 	if self._isServer then
 		error("[StateReplication] Subscribe is a client-only method.", 2)
 	end
@@ -539,48 +619,50 @@ function StateReplication:Subscribe(key: string, callback: Callback): () -> ()
 		error("[StateReplication] Subscribe requires callback function.", 2)
 	end
 
-	if not self._subscribers[key] then
-		self._subscribers[key] = {}
+	local active = true
+	local function listener(value: any)
+		if active then
+			callback(value)
+		end
 	end
-
-	local subscribers = self._subscribers[key]
-	table.insert(subscribers, callback)
-	callback(self:Get(key))
-
-	return function()
+	local subscribers = table.clone(self._subscribers[key] or {})
+	table.insert(subscribers, listener)
+	self._subscribers[key] = subscribers
+	local function unsubscribe()
+		if not active then
+			return
+		end
+		active = false
 		local list = self._subscribers[key]
 		if not list then
 			return
 		end
-		for index, current in ipairs(list) do
-			if current == callback then
-				table.remove(list, index)
-				break
-			end
+		local updated = table.clone(list)
+		local index = table.find(updated, listener)
+		if index then
+			table.remove(updated, index)
 		end
-		if #list == 0 then
-			self._subscribers[key] = nil
-		end
+		self._subscribers[key] = if #updated > 0 then updated else nil
 	end
+	local protectedResult = table.pack(pcall(callback, self:Get(key)))
+	local ok, err = protectedResult[1], protectedResult[2]
+	if not ok then
+		unsubscribe()
+		error(err, 0)
+	end
+	return unsubscribe
 end
 
---[[
-	RequestSync — async fire-and-respond handshake.
-
-	Fires EVENT_SNAPSHOT to the server (no args = "please send me a snapshot").
-	Registers a one-shot handler on EVENT_SNAPSHOT to receive the response.
-	Deltas arriving during the round-trip are buffered and replayed after the
-	snapshot is applied.
-
-	Returns true if the request was dispatched, false if Network is unavailable.
-]]
-function StateReplication:RequestSync(): boolean
+-- Snapshot requests have an id, a deadline, and at most three attempts.
+-- Legacy servers may omit the id; per-key versions still prevent rollback.
+-- Deltas remain live while waiting, so unavailable servers cannot grow a queue.
+function StateReplication.RequestSync(self: StateReplicationInternal): boolean
 	if self._isServer then
 		return false
 	end
 
 	local net = self._network
-	if not net then
+	if not net or not net._fireInternalServer then
 		return false
 	end
 
@@ -591,22 +673,69 @@ function StateReplication:RequestSync(): boolean
 
 	self._syncYielding = true
 
-	-- One-shot handler: fires once when the server replies with a snapshot.
+	local attempts = 0
+	local requestId = 0
+	local retryPending = false
+	local sendRequest: () -> boolean
 	local onSnapshot: (...any) -> ()
-	onSnapshot = function(snapshot: any)
-		-- Unregister ourselves immediately.
-		net.Unregister(EVENT_SNAPSHOT, onSnapshot)
+	local function cancelTimer()
+		if self._syncTimer then
+			task.cancel(self._syncTimer)
+			self._syncTimer = nil
+		end
+	end
+	local function finish()
+		cancelTimer()
+		net._unregisterInternal(EVENT_SNAPSHOT, onSnapshot)
 		self._snapshotHandler = nil
 		self._syncYielding = false
-
-		if type(snapshot) ~= "table" then
-			table.clear(self._syncBuffer)
+	end
+	local function retryAfter(delaySeconds: number)
+		cancelTimer()
+		if attempts >= 3 then
+			finish()
+			warn(
+				"[StateReplication] Snapshot retries exhausted; live deltas remain enabled. RequestSync may be retried."
+			)
 			return
 		end
+		retryPending = true
+		self._syncTimer = task.delay(delaySeconds, function()
+			self._syncTimer = nil
+			if self._snapshotHandler == onSnapshot then
+				sendRequest()
+			end
+		end)
+	end
+
+	onSnapshot = function(snapshot: any)
+		if self._snapshotHandler ~= onSnapshot or type(snapshot) ~= "table" then
+			return
+		end
+		if snapshot.requestId ~= nil and snapshot.requestId ~= requestId then
+			return
+		end
+		if snapshot.retryAfter ~= nil then
+			if
+				not retryPending
+				and type(snapshot.retryAfter) == "number"
+				and snapshot.retryAfter >= 0
+				and snapshot.retryAfter < math.huge
+			then
+				retryAfter(math.max(SNAPSHOT_REQUEST_COOLDOWN_SECONDS, snapshot.retryAfter))
+			end
+			return
+		end
+		finish()
 
 		local previousResolved = snapshotResolvedState(self)
 
-		-- Apply the snapshot wholesale.
+		local oldGlobal = table.clone(self._clientGlobalState)
+		local oldGlobalVersions = table.clone(self._clientGlobalVersions)
+		local oldPlayer = table.clone(self._clientPlayerState)
+		local oldPlayerVersions = table.clone(self._clientPlayerVersions)
+
+		-- Apply the snapshot, retaining any newer values (including deletions).
 		table.clear(self._clientGlobalState)
 		table.clear(self._clientGlobalVersions)
 		table.clear(self._clientPlayerState)
@@ -616,6 +745,19 @@ function StateReplication:RequestSync(): boolean
 		applySnapshotVersions(self._clientGlobalVersions, getSnapshotMap(snapshot, "globalVersions"))
 		applySnapshotValues(self._clientPlayerState, getSnapshotMap(snapshot, "player"))
 		applySnapshotVersions(self._clientPlayerVersions, getSnapshotMap(snapshot, "playerVersions"))
+
+		for key, version in pairs(oldGlobalVersions) do
+			if version >= (self._clientGlobalVersions[key] or 0) then
+				self._clientGlobalVersions[key] = version
+				self._clientGlobalState[key] = oldGlobal[key]
+			end
+		end
+		for key, version in pairs(oldPlayerVersions) do
+			if version >= (self._clientPlayerVersions[key] or 0) then
+				self._clientPlayerVersions[key] = version
+				self._clientPlayerState[key] = oldPlayer[key]
+			end
+		end
 
 		local currentResolved = snapshotResolvedState(self)
 
@@ -630,35 +772,43 @@ function StateReplication:RequestSync(): boolean
 				notify(self, k, nil)
 			end
 		end
-
-		-- Drain buffered deltas that arrived during the round-trip.
-		for _, buffered in ipairs(self._syncBuffer) do
-			if isValidDelta(buffered[1], buffered[2], buffered[4]) then
-				applyClientDelta(self, buffered[1] :: string, buffered[2] :: string, buffered[3], buffered[4] :: number)
-			end
-		end
-		table.clear(self._syncBuffer)
 	end
 
 	-- Store reference so resetState() can unregister it if needed.
 	self._snapshotHandler = onSnapshot
-	net.Register(EVENT_SNAPSHOT, onSnapshot)
+	net._registerInternal(EVENT_SNAPSHOT, onSnapshot)
 
-	-- Fire the request to the server.
-	if net.FireServer then
-		net.FireServer(EVENT_SNAPSHOT)
+	sendRequest = function(): boolean
+		attempts += 1
+		retryPending = false
+		self._nextRequestId = (self._nextRequestId or 0) + 1
+		requestId = self._nextRequestId :: number
+		self._syncTimer = task.delay(self._syncTimeout, function()
+			self._syncTimer = nil
+			if self._snapshotHandler == onSnapshot then
+				retryAfter(SNAPSHOT_REQUEST_COOLDOWN_SECONDS)
+			end
+		end)
+		local protectedResult = table.pack(pcall(net._fireInternalServer, EVENT_SNAPSHOT, requestId))
+		local ok, err = protectedResult[1], protectedResult[2]
+		if not ok then
+			finish()
+			warn(string.format("[StateReplication] Snapshot request failed: %s", tostring(err)))
+			return false
+		end
+		return true
 	end
-
-	return true
+	return sendRequest()
 end
 
-function StateReplication:_onPlayerRemoving(player: any)
+function StateReplication._onPlayerRemoving(self: StateReplicationInternal, player: any)
 	if player == nil then
 		return
 	end
 	self._playerState[player] = nil
 	self._playerVersions[player] = nil
 	self._snapshotRequestTimes[player] = nil
+	self._snapshotRetryResponseTimes[player] = nil
 end
 
-return StateReplication
+return (StateReplication :: any) :: StateReplicationAPI

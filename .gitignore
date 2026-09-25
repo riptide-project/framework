@@ -21,6 +21,7 @@ sourcemap.json
 /out/
 /tmp/
 /.tmp/
+/package.tar.gz
 *.rbxm
 *.rbxmx
 

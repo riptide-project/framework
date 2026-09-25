@@ -1,6 +1,4 @@
 --!strict
--- Riptide/StateMachine.lua
--- Robust state orchestration utility.
 
 local Signal = nil
 do
@@ -53,14 +51,15 @@ function StateMachine.new(config: StateMachineConfig): StateMachine
 	end
 
 	local self = setmetatable({
-		_states = config.States,
+		_states = table.clone(config.States),
 		_currentStateName = config.InitialState,
 		OnStateChanged = Signal.new(),
 	}, StateMachine)
 
 	local initialStateDef = self._states[self._currentStateName]
 	if initialStateDef and type(initialStateDef.OnEnter) == "function" then
-		local ok, err = xpcall(initialStateDef.OnEnter, debug.traceback, initialStateDef)
+		local protectedResult = table.pack(xpcall(initialStateDef.OnEnter, debug.traceback, initialStateDef))
+		local ok, err = protectedResult[1], protectedResult[2]
 		if not ok then
 			warn(
 				string.format(
@@ -94,11 +93,11 @@ function StateMachine:TransitionTo(newStateName: string, ...: any)
 
 	if oldStateDef and oldStateDef.CanTransitionTo then
 		local allowed = false
-		local guardType = type(oldStateDef.CanTransitionTo)
-		if guardType == "function" then
-			allowed = oldStateDef.CanTransitionTo(oldStateDef, newStateName)
-		elseif guardType == "table" then
-			for _, stateName in ipairs(oldStateDef.CanTransitionTo) do
+		local guard = oldStateDef.CanTransitionTo
+		if type(guard) == "function" then
+			allowed = guard(oldStateDef, newStateName)
+		elseif type(guard) == "table" then
+			for _, stateName in ipairs(guard) do
 				if stateName == newStateName then
 					allowed = true
 					break
@@ -118,7 +117,8 @@ function StateMachine:TransitionTo(newStateName: string, ...: any)
 	end
 
 	if oldStateDef and type(oldStateDef.OnExit) == "function" then
-		local ok, err = xpcall(oldStateDef.OnExit, debug.traceback, oldStateDef)
+		local protectedResult = table.pack(xpcall(oldStateDef.OnExit, debug.traceback, oldStateDef))
+		local ok, err = protectedResult[1], protectedResult[2]
 		if not ok then
 			warn(string.format("[StateMachine] OnExit error in state '%s':\n%s", self._currentStateName, tostring(err)))
 		end
@@ -128,7 +128,8 @@ function StateMachine:TransitionTo(newStateName: string, ...: any)
 	self._currentStateName = newStateName
 
 	if type(newStateDef.OnEnter) == "function" then
-		local ok, err = xpcall(newStateDef.OnEnter, debug.traceback, newStateDef, ...)
+		local protectedResult = table.pack(xpcall(newStateDef.OnEnter, debug.traceback, newStateDef, ...))
+		local ok, err = protectedResult[1], protectedResult[2]
 		if not ok then
 			warn(string.format("[StateMachine] OnEnter error in state '%s':\n%s", newStateName, tostring(err)))
 		end
@@ -140,7 +141,8 @@ end
 function StateMachine:Update(dt: number)
 	local currentStateDef = self._states[self._currentStateName]
 	if currentStateDef and type(currentStateDef.OnUpdate) == "function" then
-		local ok, err = xpcall(currentStateDef.OnUpdate, debug.traceback, currentStateDef, dt)
+		local protectedResult = table.pack(xpcall(currentStateDef.OnUpdate, debug.traceback, currentStateDef, dt))
+		local ok, err = protectedResult[1], protectedResult[2]
 		if not ok then
 			warn(
 				string.format("[StateMachine] OnUpdate error in state '%s':\n%s", self._currentStateName, tostring(err))
@@ -152,7 +154,8 @@ end
 function StateMachine:Destroy()
 	local currentStateDef = self._states[self._currentStateName]
 	if currentStateDef and type(currentStateDef.OnExit) == "function" then
-		local ok, err = xpcall(currentStateDef.OnExit, debug.traceback, currentStateDef)
+		local protectedResult = table.pack(xpcall(currentStateDef.OnExit, debug.traceback, currentStateDef))
+		local ok, err = protectedResult[1], protectedResult[2]
 		if not ok then
 			warn(
 				string.format(

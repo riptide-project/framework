@@ -1,29 +1,17 @@
 --!strict
--- Riptide/Network.lua
--- High-performance shared Network Manager.
---
--- DESIGN CONTRACT (v0.9.1):
---   • RemoteFunctions are removed entirely.  Use Async.lua over RemoteEvents
---     for request/response patterns instead.
---   • Middleware chains are resolved with a flat for-loop; no closures or
---     recursive xpcall stacks are created per packet.
---   • Handlers are dispatched synchronously in the event callback thread.
---     Developers must not yield inside handlers; use task.defer if needed.
 
+type TaskLibrary = typeof(task)
 local task = task
 if not task then
-	task = require("@lune/task")
+	local loadTask: (string) -> TaskLibrary = require
+	task = loadTask("@lune/task")
 end
 
-type Callback = (...any) -> any
+type Callback = (...any) -> ...any
 type HandlerMap = { [string]: { Callback } }
-type TypedWrapperMap = { [string]: { [Callback]: Callback } }
+type TypedWrapperMap = { [string]: { [Callback]: { Callback } } }
 type GuardFunction = (any) -> (boolean, string?)
 type Middleware = (...any) -> any
-
--- ---------------------------------------------------------------------------
--- Public API types
--- ---------------------------------------------------------------------------
 
 export type NetworkDeps = {
 	IsServer: boolean,
@@ -73,23 +61,18 @@ export type NetworkClientAPI = NetworkClientFireAPI & {
 }
 
 export type NetworkAPI = NetworkBaseAPI & {
-	-- Server-side fire APIs (nil on client)
 	FireClient: ((player: Player, funcName: string, ...any) -> ())?,
 	FireAllClients: ((funcName: string, ...any) -> ())?,
 	UnreliableFireClient: ((player: Player, funcName: string, ...any) -> ())?,
 	UnreliableFireAllClients: ((funcName: string, ...any) -> ())?,
-	-- Client-side fire APIs (nil on server)
 	FireServer: ((funcName: string, ...any) -> ())?,
 	UnreliableFireServer: ((funcName: string, ...any) -> ())?,
 	TypedServer: (<TEvents>() -> TypedServer<TEvents>)?,
 	TypedClient: (<TEvents>() -> TypedClient<TEvents>)?,
 }
 
--- ---------------------------------------------------------------------------
--- Module state
--- ---------------------------------------------------------------------------
-
 local Handlers: HandlerMap = {}
+local InternalHandlers: HandlerMap = {}
 local TypedWrappers: TypedWrapperMap = {}
 
 local EventDispatcher: any = nil
@@ -103,9 +86,46 @@ local Middlewares = {
 	client = {} :: { Middleware },
 }
 
--- ---------------------------------------------------------------------------
--- Internal helpers
--- ---------------------------------------------------------------------------
+local function isInternalName(funcName: any): boolean
+	return type(funcName) == "string" and string.sub(funcName, 1, 10) == "__riptide_"
+end
+
+local function assertPublicName(funcName: string)
+	if type(funcName) ~= "string" or isInternalName(funcName) then
+		error("[Network] Public event name must be a string outside the '__riptide_' namespace.", 3)
+	end
+end
+
+local function assertInternalName(funcName: string)
+	if not isInternalName(funcName) then
+		error("[Network] Internal event name must start with '__riptide_'.", 3)
+	end
+end
+
+local function addHandler(handlersByName: HandlerMap, funcName: string, callback: Callback)
+	local handlers = table.clone(handlersByName[funcName] or {})
+	table.insert(handlers, callback)
+	handlersByName[funcName] = handlers
+end
+
+local function removeHandler(handlersByName: HandlerMap, funcName: string, callback: Callback)
+	local handlers = handlersByName[funcName]
+	if not handlers then
+		return
+	end
+	handlers = table.clone(handlers)
+	for i, handler in ipairs(handlers) do
+		if handler == callback then
+			table.remove(handlers, i)
+			break
+		end
+	end
+	if #handlers == 0 then
+		handlersByName[funcName] = nil
+	else
+		handlersByName[funcName] = handlers
+	end
+end
 
 local function disconnectCurrentEventConnection()
 	if EventConnection and type(EventConnection.Disconnect) == "function" then
@@ -133,7 +153,12 @@ local function setTypedWrapper(funcName: string, callback: Callback, wrappedCall
 		wrappersForEvent = {}
 		TypedWrappers[funcName] = wrappersForEvent
 	end
-	wrappersForEvent[callback] = wrappedCallback
+	local wrappers = wrappersForEvent[callback]
+	if not wrappers then
+		wrappers = {}
+		wrappersForEvent[callback] = wrappers
+	end
+	table.insert(wrappers, wrappedCallback)
 end
 
 local function getTypedWrapper(funcName: string, callback: Callback): Callback?
@@ -141,7 +166,8 @@ local function getTypedWrapper(funcName: string, callback: Callback): Callback?
 	if not wrappersForEvent then
 		return nil
 	end
-	return wrappersForEvent[callback]
+	local wrappers = wrappersForEvent[callback]
+	return if wrappers then wrappers[#wrappers] else nil
 end
 
 local function clearTypedWrapper(funcName: string, callback: Callback)
@@ -149,25 +175,18 @@ local function clearTypedWrapper(funcName: string, callback: Callback)
 	if not wrappersForEvent then
 		return
 	end
-	wrappersForEvent[callback] = nil
+	local wrappers = wrappersForEvent[callback]
+	if wrappers then
+		table.remove(wrappers)
+		if #wrappers == 0 then
+			wrappersForEvent[callback] = nil
+		end
+	end
 	if next(wrappersForEvent) == nil then
 		TypedWrappers[funcName] = nil
 	end
 end
-
---[[
-	runServerMiddlewareChain — flat for-loop, zero closure allocation.
-
-	Each middleware in the server stack receives:
-	  (player, funcName, args: {any}) -> boolean
-	Returning `false` from a middleware short-circuits the chain and suppresses
-	handler dispatch.  Any error inside a middleware is caught, logged, and
-	also halts the chain.
-
-	The `args` table is passed by reference so middleware can mutate payload
-	in place without additional allocations.
-]]
-local function runServerMiddlewareChain(player: any, funcName: string, args: { any }, handlers: { Callback })
+local function runServerMiddlewareChain(player: any, funcName: string, args: { [any]: any }, handlers: { Callback })
 	local mw = Middlewares.server
 	for i = 1, #mw do
 		local ok, result = xpcall(mw[i], debug.traceback, player, funcName, args)
@@ -175,28 +194,19 @@ local function runServerMiddlewareChain(player: any, funcName: string, args: { a
 			warn(string.format("[Network] Server middleware[%d] error for '%s': %s", i, funcName, tostring(result)))
 			return
 		end
-		-- Middleware may explicitly return false to abort the chain
 		if result == false then
 			return
 		end
 	end
 
-	-- SYNCHRONOUS dispatch — no task.spawn; handlers execute in this thread.
 	for _, handler in ipairs(handlers) do
-		local ok2, err = xpcall(handler, debug.traceback, player, table.unpack(args))
+		local ok2, err = xpcall(handler, debug.traceback, player, table.unpack(args, 1, args.n))
 		if not ok2 then
 			warn(string.format("[Network] Handler error for '%s': %s", funcName, tostring(err)))
 		end
 	end
 end
-
---[[
-	runClientMiddlewareChain — flat for-loop, zero closure allocation.
-
-	Each middleware receives:
-	  (funcName, args: {any}) -> boolean
-]]
-local function runClientMiddlewareChain(funcName: string, args: { any }, handlers: { Callback })
+local function runClientMiddlewareChain(funcName: string, args: { [any]: any }, handlers: { Callback })
 	local mw = Middlewares.client
 	for i = 1, #mw do
 		local ok, result = xpcall(mw[i], debug.traceback, funcName, args)
@@ -210,18 +220,23 @@ local function runClientMiddlewareChain(funcName: string, args: { any }, handler
 	end
 
 	for _, handler in ipairs(handlers) do
-		local ok2, err = xpcall(handler, debug.traceback, table.unpack(args))
+		local ok2, err = xpcall(handler, debug.traceback, table.unpack(args, 1, args.n))
 		if not ok2 then
 			warn(string.format("[Network] Handler error for '%s': %s", funcName, tostring(err)))
 		end
 	end
 end
 
--- ---------------------------------------------------------------------------
--- Network module
--- ---------------------------------------------------------------------------
+export type NetworkInternalAPI = NetworkAPI & {
+	_registerInternal: (funcName: string, callback: Callback) -> (),
+	_unregisterInternal: (funcName: string, callback: Callback) -> (),
+	_fireInternalClient: ((player: Player, funcName: string, ...any) -> ())?,
+	_fireInternalAllClients: ((funcName: string, ...any) -> ())?,
+	_fireInternalServer: ((funcName: string, ...any) -> ())?,
+	_clearHandlersForTests: () -> (),
+}
 
-local Network = {} :: NetworkAPI
+local Network = {} :: NetworkInternalAPI
 local TypedServerProxy: any = nil
 local TypedClientProxy: any = nil
 
@@ -327,17 +342,32 @@ function Network._init(deps: NetworkDeps)
 	UnreliableEventDispatcher = deps.UnreliableEventDispatcher
 
 	table.clear(Handlers)
+	table.clear(InternalHandlers)
 	table.clear(TypedWrappers)
-	table.clear(Middlewares.server)
-	table.clear(Middlewares.client)
+	Middlewares.server = {}
+	Middlewares.client = {}
 	TypedServerProxy = nil
 	TypedClientProxy = nil
 
 	if IS_SERVER then
-		Network.TypedServer = typedServer
+		Network.TypedServer = typedServer :: any
 		Network.TypedClient = nil
 
 		EventConnection = EventDispatcher.OnServerEvent:Connect(function(player: Player, funcName: any, ...: any)
+			if isInternalName(funcName) then
+				local internalHandlers = InternalHandlers[funcName]
+				if internalHandlers then
+					for _, handler in ipairs(internalHandlers) do
+						local ok, err = xpcall(handler, debug.traceback, player, ...)
+						if not ok then
+							warn(
+								string.format("[Network] Internal handler error for '%s': %s", funcName, tostring(err))
+							)
+						end
+					end
+				end
+				return
+			end
 			local handlers = getHandlersForIncomingEvent(funcName)
 			if not handlers then
 				return
@@ -351,13 +381,16 @@ function Network._init(deps: NetworkDeps)
 					end
 				end
 			else
-				runServerMiddlewareChain(player, funcName, { ... }, handlers)
+				runServerMiddlewareChain(player, funcName, table.pack(...), handlers)
 			end
 		end)
 
 		if UnreliableEventDispatcher ~= EventDispatcher then
 			UnreliableEventConnection = UnreliableEventDispatcher.OnServerEvent:Connect(
 				function(player: Player, funcName: any, ...: any)
+					if isInternalName(funcName) then
+						return
+					end
 					local handlers = getHandlersForIncomingEvent(funcName)
 					if not handlers then
 						return
@@ -371,7 +404,7 @@ function Network._init(deps: NetworkDeps)
 							end
 						end
 					else
-						runServerMiddlewareChain(player, funcName, { ... }, handlers)
+						runServerMiddlewareChain(player, funcName, table.pack(...), handlers)
 					end
 				end
 			)
@@ -380,28 +413,57 @@ function Network._init(deps: NetworkDeps)
 		end
 
 		Network.FireClient = function(_player: Player, funcName: string, ...: any)
+			assertPublicName(funcName)
 			EventDispatcher:FireClient(_player, funcName, ...)
 		end
 
 		Network.FireAllClients = function(funcName: string, ...: any)
+			assertPublicName(funcName)
 			EventDispatcher:FireAllClients(funcName, ...)
 		end
 
 		Network.UnreliableFireClient = function(_player: Player, funcName: string, ...: any)
+			assertPublicName(funcName)
 			UnreliableEventDispatcher:FireClient(_player, funcName, ...)
 		end
 
 		Network.UnreliableFireAllClients = function(funcName: string, ...: any)
+			assertPublicName(funcName)
 			UnreliableEventDispatcher:FireAllClients(funcName, ...)
 		end
+
+		Network._fireInternalClient = function(player: Player, funcName: string, ...: any)
+			assertInternalName(funcName)
+			EventDispatcher:FireClient(player, funcName, ...)
+		end
+
+		Network._fireInternalAllClients = function(funcName: string, ...: any)
+			assertInternalName(funcName)
+			EventDispatcher:FireAllClients(funcName, ...)
+		end
+		Network._fireInternalServer = nil
 
 		Network.FireServer = nil
 		Network.UnreliableFireServer = nil
 	else
 		Network.TypedServer = nil
-		Network.TypedClient = typedClient
+		Network.TypedClient = typedClient :: any
 
 		EventConnection = EventDispatcher.OnClientEvent:Connect(function(funcName: any, ...: any)
+			if isInternalName(funcName) then
+				local internalHandlers = InternalHandlers[funcName]
+				if internalHandlers then
+					for _, handler in ipairs(internalHandlers) do
+						local ok, err = xpcall(handler, debug.traceback, ...)
+						if not ok then
+							warn(
+								string.format("[Network] Internal handler error for '%s': %s", funcName, tostring(err))
+							)
+						end
+					end
+				end
+				return
+			end
 			local handlers = getHandlersForIncomingEvent(funcName)
 			if not handlers then
 				return
@@ -415,13 +477,16 @@ function Network._init(deps: NetworkDeps)
 					end
 				end
 			else
-				runClientMiddlewareChain(funcName, { ... }, handlers)
+				runClientMiddlewareChain(funcName, table.pack(...), handlers)
 			end
 		end)
 
 		if UnreliableEventDispatcher ~= EventDispatcher then
 			UnreliableEventConnection = UnreliableEventDispatcher.OnClientEvent:Connect(
 				function(funcName: any, ...: any)
+					if isInternalName(funcName) then
+						return
+					end
 					local handlers = getHandlersForIncomingEvent(funcName)
 					if not handlers then
 						return
@@ -435,7 +500,7 @@ function Network._init(deps: NetworkDeps)
 							end
 						end
 					else
-						runClientMiddlewareChain(funcName, { ... }, handlers)
+						runClientMiddlewareChain(funcName, table.pack(...), handlers)
 					end
 				end
 			)
@@ -444,12 +509,21 @@ function Network._init(deps: NetworkDeps)
 		end
 
 		Network.FireServer = function(funcName: string, ...: any)
+			assertPublicName(funcName)
 			EventDispatcher:FireServer(funcName, ...)
 		end
 
 		Network.UnreliableFireServer = function(funcName: string, ...: any)
+			assertPublicName(funcName)
 			UnreliableEventDispatcher:FireServer(funcName, ...)
 		end
+
+		Network._fireInternalServer = function(funcName: string, ...: any)
+			assertInternalName(funcName)
+			EventDispatcher:FireServer(funcName, ...)
+		end
+		Network._fireInternalClient = nil
+		Network._fireInternalAllClients = nil
 
 		Network.FireClient = nil
 		Network.FireAllClients = nil
@@ -466,16 +540,20 @@ function Network.UseMiddleware(scope: "server" | "client", middleware: Middlewar
 		error("[Network] UseMiddleware requires a middleware function.", 2)
 	end
 	if scope == "server" then
-		table.insert(Middlewares.server, middleware)
+		local updated = table.clone(Middlewares.server)
+		table.insert(updated, middleware)
+		Middlewares.server = updated
 	else
-		table.insert(Middlewares.client, middleware)
+		local updated = table.clone(Middlewares.client)
+		table.insert(updated, middleware)
+		Middlewares.client = updated
 	end
 end
 
 function Network.ClearMiddlewares(scope: ("server" | "client")?)
 	if scope == nil then
-		table.clear(Middlewares.server)
-		table.clear(Middlewares.client)
+		Middlewares.server = {}
+		Middlewares.client = {}
 		return
 	end
 
@@ -484,30 +562,25 @@ function Network.ClearMiddlewares(scope: ("server" | "client")?)
 	end
 
 	if scope == "server" then
-		table.clear(Middlewares.server)
+		Middlewares.server = {}
 	else
-		table.clear(Middlewares.client)
+		Middlewares.client = {}
 	end
 end
 
 function Network.Register(funcName: string, callback: Callback)
-	if not Handlers[funcName] then
-		Handlers[funcName] = {}
-	end
-	table.insert(Handlers[funcName], callback)
+	assertPublicName(funcName)
+	addHandler(Handlers, funcName, callback)
 end
 
 function Network.RegisterTyped(funcName: string, guards: { GuardFunction }, callback: Callback)
-	local function wrappedCallback(playerOrFirstArg: any, ...)
-		local args: { any }
-		if IS_SERVER then
-			args = { ... }
-		else
-			args = { playerOrFirstArg, ... }
-		end
+	assertPublicName(funcName)
+	local function wrappedCallback(...)
+		local args = table.pack(...)
+		local offset = if IS_SERVER then 1 else 0
 
 		for i, guard in ipairs(guards) do
-			local val = args[i]
+			local val = args[i + offset]
 			local ok, err = guard(val)
 			if not ok then
 				warn(
@@ -522,7 +595,7 @@ function Network.RegisterTyped(funcName: string, guards: { GuardFunction }, call
 			end
 		end
 
-		callback(playerOrFirstArg, ...)
+		callback(...)
 	end
 
 	setTypedWrapper(funcName, callback, wrappedCallback)
@@ -534,25 +607,26 @@ function Network.RegisterTypedUnreliable(funcName: string, guards: { GuardFuncti
 end
 
 function Network.Unregister(funcName: string, callback: Callback)
+	assertPublicName(funcName)
 	local target = getTypedWrapper(funcName, callback) or callback
-	local handlers = Handlers[funcName]
-	if handlers then
-		for i, handler in ipairs(handlers) do
-			if handler == target then
-				table.remove(handlers, i)
-				break
-			end
-		end
-		if #handlers == 0 then
-			Handlers[funcName] = nil
-		end
-	end
+	removeHandler(Handlers, funcName, target)
 	clearTypedWrapper(funcName, callback)
+end
+
+function Network._registerInternal(funcName: string, callback: Callback)
+	assertInternalName(funcName)
+	addHandler(InternalHandlers, funcName, callback)
+end
+
+function Network._unregisterInternal(funcName: string, callback: Callback)
+	assertInternalName(funcName)
+	removeHandler(InternalHandlers, funcName, callback)
 end
 
 function Network._clearHandlersForTests()
 	table.clear(Handlers)
+	table.clear(InternalHandlers)
 	table.clear(TypedWrappers)
 end
 
-return Network :: NetworkAPI
+return Network :: NetworkInternalAPI

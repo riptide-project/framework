@@ -328,9 +328,10 @@ return function()
 			})
 
 			local called = false
-			(Network :: any).Register(123, function()
+			local ok = pcall((Network :: any).Register, 123, function()
 				called = true
 			end)
+			check.equal(ok, false)
 
 			mockEvent.OnServerEvent:Fire("Player1", 123, "payload")
 			task.wait()
@@ -357,6 +358,37 @@ return function()
 			task.wait()
 
 			check.equal(received, "fast")
+		end)
+
+		test.case("should isolate internal server events from public APIs and unreliable transport", function()
+			local reliable = MockRemoteEvent.new()
+			local unreliable = MockRemoteEvent.new()
+			Network._init({ IsServer = true, EventDispatcher = reliable, UnreliableEventDispatcher = unreliable })
+
+			local eventName = "__riptide_state_snapshot"
+			local calls = 0
+			local middlewareCalls = 0
+			Network.UseMiddleware("server", function()
+				middlewareCalls += 1
+				return false
+			end)
+			local function handler(_player, requestId)
+				calls += requestId
+			end
+			Network._registerInternal(eventName, handler)
+
+			check.equal(pcall(Network.Register, eventName, function() end), false)
+			check.equal(pcall((Network :: any).FireClient, "Player1", eventName, {}), false)
+			reliable.OnServerEvent:Fire("Player1", eventName, 1)
+			unreliable.OnServerEvent:Fire("Player1", eventName, 10)
+			task.wait()
+
+			check.equal(calls, 1)
+			check.equal(middlewareCalls, 0)
+			Network._unregisterInternal(eventName, handler)
+			reliable.OnServerEvent:Fire("Player1", eventName, 2)
+			task.wait()
+			check.equal(calls, 1)
 		end)
 
 		test.case("should validate typed unreliable server events", function()
@@ -461,6 +493,27 @@ return function()
 			task.wait()
 
 			check.equal(receivedValue, "hello")
+		end)
+
+		test.case("should isolate internal client events from public middleware", function()
+			local reliable = MockRemoteEvent.new()
+			local unreliable = MockRemoteEvent.new()
+			Network._init({ IsServer = false, EventDispatcher = reliable, UnreliableEventDispatcher = unreliable })
+
+			local eventName = "__riptide_state_delta"
+			local received = nil
+			Network.UseMiddleware("client", function()
+				return false
+			end)
+			Network._registerInternal(eventName, function(value)
+				received = value
+			end)
+
+			check.equal(pcall((Network :: any).FireServer, eventName, 1), false)
+			reliable.OnClientEvent:Fire(eventName, 3)
+			unreliable.OnClientEvent:Fire(eventName, 5)
+			task.wait()
+			check.equal(received, 3)
 		end)
 
 		test.case("should fire events to server", function()
@@ -570,9 +623,10 @@ return function()
 			})
 
 			local called = false
-			(Network :: any).Register(123, function()
+			local ok = pcall((Network :: any).Register, 123, function()
 				called = true
 			end)
+			check.equal(ok, false)
 
 			mockEvent.OnClientEvent:Fire(123, "payload")
 			task.wait()

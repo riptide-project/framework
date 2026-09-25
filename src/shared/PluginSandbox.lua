@@ -40,7 +40,7 @@ type SignalInstance<T... = ...any> = {
 
 type ComponentServiceLike = {
 	_start: (self: any, componentsFolder: Folder) -> (),
-	_registerTagManually: ((self: any, tagName: string, componentClass: ComponentClass) -> ())?,
+	_registerTagManually: ((self: any, tagName: string, componentClass: ComponentClass) -> boolean)?,
 	UnregisterTag: (self: any, tagName: string) -> (),
 	[string]: any,
 }
@@ -66,18 +66,16 @@ type TroveEntryNetworkHandler = {
 }
 
 type TroveEntryStateSubscription = {
-	kind: "stateSubscription",
+	kind: "stateSubscription" | "eventBus",
 	unsubscribe: UnsubscribeFn,
 }
 
-type TroveEntryEventBus = {
-	kind: "eventBus",
-	unsubscribe: UnsubscribeFn,
-}
+type TroveEntryEventBus = TroveEntryStateSubscription
 
 type TroveEntryComponentTag = {
 	kind: "componentTag",
 	tagName: string,
+	registration: any?,
 }
 
 type TroveEntry =
@@ -161,9 +159,56 @@ local function ns(pluginName: string, eventName: string): string
 	return "__plugin:" .. pluginName .. ":" .. eventName
 end
 
+local function cleanupEntry(self: any, entry: TroveEntry)
+	if entry.kind == "signal" then
+		local e = entry :: TroveEntrySignal
+		e.signal:Destroy()
+	elseif entry.kind == "networkHandler" then
+		local e = entry :: TroveEntryNetworkHandler
+		self._deps.Network.Unregister(e.name, e.callback)
+	elseif entry.kind == "stateSubscription" then
+		local e = entry :: TroveEntryStateSubscription
+		e.unsubscribe()
+	elseif entry.kind == "eventBus" then
+		local e = entry :: TroveEntryEventBus
+		e.unsubscribe()
+	elseif entry.kind == "componentTag" then
+		local e = entry :: TroveEntryComponentTag
+		local cs = self._deps.ComponentService :: any
+		if
+			type(cs.UnregisterTag) == "function"
+			and (e.registration == nil or cs._tagListeners[e.tagName] == e.registration)
+		then
+			cs:UnregisterTag(e.tagName)
+		end
+	end
+end
+
 -- Appends an entry to the sandbox Trove.
 local function track(self: any, entry: TroveEntry)
+	if self._closed then
+		cleanupEntry(self, entry)
+		return
+	end
 	table.insert(self._trove, entry)
+end
+
+local function trackSubscription(self: any, entry: TroveEntryStateSubscription): UnsubscribeFn
+	local underlying = entry.unsubscribe
+	local active = true
+	entry.unsubscribe = function()
+		if not active then
+			return
+		end
+		active = false
+		local index = table.find(self._trove, entry)
+		if index then
+			table.remove(self._trove, index)
+		end
+		underlying()
+	end
+	track(self, entry)
+	return entry.unsubscribe
 end
 
 -- Removes a network handler entry from the Trove (used by OffNetworkEvent).
@@ -222,6 +267,9 @@ function PluginSandbox:GetState(key: string, player: Player?): any
 end
 
 function PluginSandbox:SetState(key: string, value: any)
+	if self._closed then
+		return
+	end
 	if not self._deps.IsServer then
 		self:Warn("SetState is a server-only method.")
 		return
@@ -230,6 +278,9 @@ function PluginSandbox:SetState(key: string, value: any)
 end
 
 function PluginSandbox:SetPlayerState(player: Player, key: string, value: any)
+	if self._closed then
+		return
+	end
 	if not self._deps.IsServer then
 		self:Warn("SetPlayerState is a server-only method.")
 		return
@@ -238,13 +289,15 @@ function PluginSandbox:SetPlayerState(player: Player, key: string, value: any)
 end
 
 function PluginSandbox:SubscribeState(key: string, callback: (value: any) -> ()): UnsubscribeFn
+	if self._closed then
+		return function() end
+	end
 	local unsubscribe = self._deps.State:Subscribe(key, callback)
 	local entry: TroveEntryStateSubscription = {
 		kind = "stateSubscription",
 		unsubscribe = unsubscribe,
 	}
-	track(self, entry)
-	return unsubscribe
+	return trackSubscription(self, entry)
 end
 
 -- ---------------------------------------------------------------------------
@@ -252,6 +305,9 @@ end
 -- ---------------------------------------------------------------------------
 
 function PluginSandbox:OnNetworkEvent(name: string, callback: Callback)
+	if self._closed then
+		return
+	end
 	assert(type(name) == "string" and #name > 0, "[PluginSandbox] OnNetworkEvent: name must be a non-empty string.")
 	assert(type(callback) == "function", "[PluginSandbox] OnNetworkEvent: callback must be a function.")
 
@@ -276,6 +332,9 @@ function PluginSandbox:OffNetworkEvent(name: string, callback: Callback)
 end
 
 function PluginSandbox:FireClient(player: Player, name: string, ...: any)
+	if self._closed then
+		return
+	end
 	if not self._deps.IsServer then
 		self:Warn("FireClient is a server-only method.")
 		return
@@ -289,6 +348,9 @@ function PluginSandbox:FireClient(player: Player, name: string, ...: any)
 end
 
 function PluginSandbox:FireAllClients(name: string, ...: any)
+	if self._closed then
+		return
+	end
 	if not self._deps.IsServer then
 		self:Warn("FireAllClients is a server-only method.")
 		return
@@ -302,6 +364,9 @@ function PluginSandbox:FireAllClients(name: string, ...: any)
 end
 
 function PluginSandbox:FireServer(name: string, ...: any)
+	if self._closed then
+		return
+	end
 	if self._deps.IsServer then
 		self:Warn("FireServer is a client-only method.")
 		return
@@ -319,6 +384,7 @@ end
 -- ---------------------------------------------------------------------------
 
 function PluginSandbox:CreateSignal<T...>(): SignalInstance<T...>
+	assert(not self._closed, "[PluginSandbox] Cannot create a signal after cleanup.")
 	local signal = self._deps.Signal.new()
 	local entry: TroveEntrySignal = {
 		kind = "signal",
@@ -333,6 +399,9 @@ end
 -- ---------------------------------------------------------------------------
 
 function PluginSandbox:RegisterComponent(tag: string, componentClass: ComponentClass)
+	if self._closed then
+		return
+	end
 	assert(type(tag) == "string" and #tag > 0, "[PluginSandbox] RegisterComponent: tag must be a non-empty string.")
 	assert(type(componentClass) == "table", "[PluginSandbox] RegisterComponent: componentClass must be a table.")
 	assert(
@@ -346,7 +415,9 @@ function PluginSandbox:RegisterComponent(tag: string, componentClass: ComponentC
 	-- This allows ComponentService to remain the source of truth.
 	local registerTagManually = self._deps.ComponentService._registerTagManually
 	if type(registerTagManually) == "function" then
-		registerTagManually(self._deps.ComponentService, tag, componentClass)
+		if registerTagManually(self._deps.ComponentService, tag, componentClass) ~= true then
+			return
+		end
 	else
 		-- Fallback: warn rather than crash — ComponentService may not yet expose
 		-- this method until the integration PR lands.
@@ -363,6 +434,7 @@ function PluginSandbox:RegisterComponent(tag: string, componentClass: ComponentC
 	local entry: TroveEntryComponentTag = {
 		kind = "componentTag",
 		tagName = tag,
+		registration = self._deps.ComponentService._tagListeners and self._deps.ComponentService._tagListeners[tag],
 	}
 	track(self, entry)
 end
@@ -372,6 +444,9 @@ end
 -- ---------------------------------------------------------------------------
 
 function PluginSandbox:Emit(eventName: string, ...: any)
+	if self._closed then
+		return
+	end
 	assert(
 		type(eventName) == "string" and #eventName > 0,
 		"[PluginSandbox] Emit: eventName must be a non-empty string."
@@ -380,6 +455,9 @@ function PluginSandbox:Emit(eventName: string, ...: any)
 end
 
 function PluginSandbox:On(eventName: string, callback: Callback): UnsubscribeFn
+	if self._closed then
+		return function() end
+	end
 	assert(type(eventName) == "string" and #eventName > 0, "[PluginSandbox] On: eventName must be a non-empty string.")
 	assert(type(callback) == "function", "[PluginSandbox] On: callback must be a function.")
 
@@ -388,24 +466,37 @@ function PluginSandbox:On(eventName: string, callback: Callback): UnsubscribeFn
 		kind = "eventBus",
 		unsubscribe = unsubscribe,
 	}
-	track(self, entry)
-	return unsubscribe
+	return trackSubscription(self, entry)
 end
 
 function PluginSandbox:Once(eventName: string, callback: Callback): UnsubscribeFn
+	if self._closed then
+		return function() end
+	end
 	assert(
 		type(eventName) == "string" and #eventName > 0,
 		"[PluginSandbox] Once: eventName must be a non-empty string."
 	)
 	assert(type(callback) == "function", "[PluginSandbox] Once: callback must be a function.")
 
-	local unsubscribe = self._deps.OnceBusEvent(eventName, callback)
-	local entry: TroveEntryEventBus = {
-		kind = "eventBus",
-		unsubscribe = unsubscribe,
-	}
-	track(self, entry)
-	return unsubscribe
+	local off: UnsubscribeFn? = nil
+	local fired = false
+	local unsubscribe = self._deps.OnceBusEvent(eventName, function(...)
+		fired = true
+		if off then
+			off()
+		end
+		if not self._closed then
+			callback(...)
+		end
+	end)
+	local entry: TroveEntryEventBus = { kind = "eventBus", unsubscribe = unsubscribe }
+	local tracked = trackSubscription(self, entry)
+	off = tracked
+	if fired then
+		tracked()
+	end
+	return tracked
 end
 
 -- ---------------------------------------------------------------------------
@@ -437,12 +528,15 @@ end
 -- ---------------------------------------------------------------------------
 
 function PluginSandbox:RunAsync(fn: Callback, timeout: number, ...: any): ...any
+	if self._closed then
+		return
+	end
 	assert(type(fn) == "function", "[PluginSandbox] RunAsync: fn must be a function.")
 	assert(type(timeout) == "number" and timeout > 0, "[PluginSandbox] RunAsync: timeout must be a positive number.")
 
-	local args = { ... }
+	local args = table.pack(...)
 	return self._deps.Async.Run(function()
-		return fn(table.unpack(args))
+		return fn(table.unpack(args, 1, args.n))
 	end, timeout)
 end
 
@@ -454,31 +548,17 @@ end
 --- Force-cleans every resource tracked by this sandbox.
 --- Called by PluginManager on plugin error. Does NOT call Stop/Destroy.
 function PluginSandbox:CleanupAll()
+	if self._closed then
+		return
+	end
+	self._closed = true
 	local trove = self._trove :: { TroveEntry }
+	self._trove = {}
 
 	for i = #trove, 1, -1 do
 		local entry = trove[i]
-		local ok, err = pcall(function()
-			if entry.kind == "signal" then
-				local e = entry :: TroveEntrySignal
-				e.signal:Destroy()
-			elseif entry.kind == "networkHandler" then
-				local e = entry :: TroveEntryNetworkHandler
-				self._deps.Network.Unregister(e.name, e.callback)
-			elseif entry.kind == "stateSubscription" then
-				local e = entry :: TroveEntryStateSubscription
-				e.unsubscribe()
-			elseif entry.kind == "eventBus" then
-				local e = entry :: TroveEntryEventBus
-				e.unsubscribe()
-			elseif entry.kind == "componentTag" then
-				local e = entry :: TroveEntryComponentTag
-				local cs = self._deps.ComponentService :: any
-				if type(cs.UnregisterTag) == "function" then
-					cs:UnregisterTag(e.tagName)
-				end
-			end
-		end)
+		local protectedResult = table.pack(pcall(cleanupEntry, self, entry))
+		local ok, err = protectedResult[1], protectedResult[2]
 
 		if not ok then
 			warn(

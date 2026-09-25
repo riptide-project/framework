@@ -1,0 +1,10 @@
+<svg width="512" height="512" viewBox="56 60 388 388" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="riptide-gradient" x1="92" y1="112" x2="425" y2="390" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0EA5FF"/>
+      <stop offset="0.48" stop-color="#087BFF"/>
+      <stop offset="1" stop-color="#174DFF"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#riptide-gradient)" d="M72 294 C95 213 159 133 255 116 C325 103 389 128 417 171 C439 205 434 247 409 275 C388 299 357 311 323 307 C342 294 353 275 352 254 C350 224 326 203 294 201 C258 199 228 219 201 244 C174 269 151 302 126 329 C108 349 88 363 65 368 C87 344 105 316 123 287 C145 251 171 216 207 192 C158 208 116 247 72 294 Z M197 259 C219 239 245 222 273 218 C252 232 241 251 243 274 C246 310 276 338 314 350 C350 362 390 360 432 347 C401 383 359 403 313 401 C257 399 216 372 187 334 C171 313 160 300 143 299 C160 283 178 272 197 259 Z"/>
+</svg>

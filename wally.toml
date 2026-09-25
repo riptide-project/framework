@@ -1,6 +1,6 @@
 [package]
 name = "riptide/core"
-version = "0.9.0-maelstrom.2"
+version = "0.9.0-maelstrom.3"
 registry = "https://github.com/UpliftGames/wally-index"
 realm = "shared"
 description = "A strict Luau framework for Roblox with side-specific APIs, typed networking/state, module lifecycle orchestration, and sandboxed plugins."
@@ -29,8 +29,10 @@ exclude = [
 	"Packages/**",
 	"DevPackages",
 	"DevPackages/**",
-	"default.project.json",
-	"dev.project.json",
+	"*.project.json",
+	"scripts",
+	"scripts/**",
+	"package.tar.gz",
 	"pesde.toml",
 	"pesde.lock",
 	"mise.toml",

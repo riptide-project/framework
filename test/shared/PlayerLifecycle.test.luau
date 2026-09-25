@@ -13,6 +13,58 @@ local PlayerLifecycle = Env.RiptideShared.PlayerLifecycle
 
 return function()
 	test.suite("PlayerLifecycle", function()
+		test.case("leaving cancels a yielding initialization before it can create late state", function()
+			local players = MockPlayers.new()
+			local player = {}
+			players._players = { player }
+			local late, removed = false, false
+			PlayerLifecycle:_init({ Players = players })
+			PlayerLifecycle:Start({
+				{
+					name = "Audit",
+					module = {
+						OnPlayerAdded = function()
+							task.wait(0.03)
+							late = true
+						end,
+						OnPlayerRemoving = function()
+							removed = true
+						end,
+					},
+				},
+			}, {})
+			players:RemovePlayer(player)
+			task.wait(0.05)
+			check.equal(late, false)
+			check.equal(removed, true)
+		end)
+
+		test.case("players joining during startup snapshot are handled exactly once", function()
+			local players = MockPlayers.new()
+			local existing, joined = {}, {}
+			players._players = { existing }
+			local original = players.GetPlayers
+			players.GetPlayers = function(self)
+				local snapshot = table.clone(original(self))
+				self:AddPlayer(joined)
+				return snapshot
+			end
+			local seen = {}
+			PlayerLifecycle:_init({ Players = players })
+			PlayerLifecycle:Start({
+				{
+					name = "Audit",
+					module = {
+						OnPlayerAdded = function(_self, _ref, player)
+							seen[player] = (seen[player] or 0) + 1
+						end,
+					},
+				},
+			}, {})
+			check.equal(seen[existing], 1)
+			check.equal(seen[joined], 1)
+		end)
+
 		test.case("should call player hooks for existing and joining players", function()
 			local players = MockPlayers.new()
 			local existing = { UserId = 1 }

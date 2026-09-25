@@ -37,12 +37,9 @@ function EventBus:Emit(name: string, ...: any)
 
 	-- Snapshot to handle mid-iteration unsubscribes safely
 	local snapshot = table.clone(list)
-	local args = { ... }
 	for i = 1, #snapshot do
 		local listener = snapshot[i]
-		local ok, err = xpcall(function()
-			listener(table.unpack(args))
-		end, debug.traceback)
+		local ok, err = xpcall(listener, debug.traceback, ...)
 		if not ok then
 			warn(string.format("%s Error in listener for '%s': %s", self._label, name, tostring(err)))
 		end
@@ -55,8 +52,17 @@ function EventBus:On(name: string, callback: Callback): UnsubscribeFn
 	end
 	table.insert(self._listeners[name], callback)
 
+	local active = true
+	local subscribedList = self._listeners[name]
 	return function()
+		if not active then
+			return
+		end
+		active = false
 		local list = self._listeners[name]
+		if list ~= subscribedList then
+			return
+		end
 		if not list then
 			return
 		end
@@ -76,6 +82,9 @@ function EventBus:Once(name: string, callback: Callback): UnsubscribeFn
 	local unsubscribe: UnsubscribeFn? = nil
 	unsubscribe = self:On(name, function(...: any)
 		local currentUnsubscribe = unsubscribe
+		if not currentUnsubscribe then
+			return
+		end
 		if currentUnsubscribe then
 			currentUnsubscribe()
 			unsubscribe = nil

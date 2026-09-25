@@ -1,0 +1,34 @@
+---
+slug: versions/0.9.0-maelstrom.3
+title: Riptide 0.9.0-maelstrom.3
+description: Guides and API reference for Riptide 0.9.0-maelstrom.3.
+template: splash
+banner:
+  content: "Maelstrom-3 is the latest preview release. Version 0.8.2 remains the latest stable release."
+hero:
+  tagline: "Explore the Maelstrom-3 preview API."
+  image:
+    file: ../../../../assets/logo.svg
+  actions:
+    - text: Getting started
+      link: ./guides/getting-started/
+      icon: right-arrow
+      variant: primary
+    - text: All versions
+      link: ../
+      icon: document
+      variant: minimal
+---
+
+import VersionLanding from '../../../../components/VersionLanding.astro';
+
+<VersionLanding version="0.9.0-maelstrom.3" />
+
+## Changes since Maelstrom-2
+
+- Signal listeners run independently; a yielding or failing listener does not block the others.
+- State resync has request IDs and bounded retries. Live updates continue while a snapshot is in flight.
+- Internal state messages use a reserved reliable route, separate from game event handlers and middleware.
+- Player initialization runs independently per player. Plugin startup and cleanup handle failures more strictly.
+
+See [the Maelstrom-2 migration guide](./migration/from-maelstrom-2/) for behavior changes and upgrade checks.

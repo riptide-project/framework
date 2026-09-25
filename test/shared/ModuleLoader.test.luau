@@ -60,6 +60,49 @@ return function()
 	end)
 
 	test.suite("ModuleLoader.Launch", function()
+		test.case("failed Init excludes a module from Start and player hooks", function()
+			local originalLoad = ModuleLoader.LoadModules
+			local originalNormalize = ModuleLoader.NormalizeFolders
+			local started, lifecycleCount = 0, -1
+			ModuleLoader.NormalizeFolders = function(_input, name)
+				return if name == "ModulesFolder" then { {} } else {}
+			end
+			ModuleLoader.LoadModules = function(_folder, _seen, _ref, modules)
+				table.insert(modules, {
+					name = "Broken",
+					module = {
+						Init = function()
+							error("intentional Init failure")
+						end,
+						Start = function()
+							started += 10
+						end,
+					},
+				})
+				table.insert(
+					modules,
+					{ name = "Healthy", module = {
+						Start = function()
+							started += 1
+						end,
+					} }
+				)
+			end
+			local ok, err = pcall(ModuleLoader.Launch, "Server", {
+				PlayerLifecycle = {
+					Start = function(_self, modules)
+						lifecycleCount = #modules
+					end,
+				},
+			}, { ModulesFolder = {} })
+			ModuleLoader.LoadModules = originalLoad
+			ModuleLoader.NormalizeFolders = originalNormalize
+			assert(ok, tostring(err))
+			task.wait()
+			check.equal(started, 1)
+			check.equal(lifecycleCount, 1)
+		end)
+
 		test.case("should run Init before Start", function()
 			local lifecycle = {}
 			local riptide = {

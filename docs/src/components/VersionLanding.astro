@@ -1,0 +1,42 @@
+---
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+interface Props { version: string }
+const { version } = Astro.props;
+const isMaelstrom = version.includes('maelstrom');
+const isLegacy = ['0.3.0', '0.4.0', '0.5.0', '0.6.0', '0.7.0', '0.7.1'].includes(version);
+const supportsState = !['0.3.0', '0.4.0', '0.5.0', '0.6.0'].includes(version);
+const firstGuide = version === '0.8.2' ? 'guides/quickstart' : 'guides/getting-started';
+const highlights: Record<string, string> = {
+  '0.3.0': 'The first documented lifecycle, named networking, and tagged components.',
+  '0.4.0': 'Canonical module paths and unambiguous lookups for nested folders.',
+  '0.5.0': 'Shared module folders, multiple module roots, and Pesde support.',
+  '0.6.0': 'Pesde as the package manager and a revised module loader.',
+  '0.7.0': 'Server-authoritative global and per-player state replication.',
+  '0.7.1': 'Fixes for scoped state updates, player overrides, and subscriptions.',
+  '0.8.0': 'A dedicated documentation set for the 0.8 API.',
+  '0.8.1': 'The 0.8 API with its own release documentation snapshot.',
+  '0.8.2': 'The latest stable release, with a short first-run guide and examples.',
+  '0.9.0-maelstrom.2': 'A preview of the next API, including plugins and migration guides.',
+  '0.9.0-maelstrom.3': 'The Maelstrom-3 preview with independent signals and safer state sync.',
+};
+---
+
+<section>
+  <h2>Start with Riptide {version}</h2>
+  <p>{highlights[version]}</p>
+  <p>These guides match this release. Keep the version selector on <strong>v{version}</strong> while following examples.</p>
+  <CardGrid>
+    <LinkCard title="Getting started" href={`./${firstGuide}/`} description="Install this version and launch your first modules." />
+    <LinkCard title="Module lifecycle" href="./guides/module-lifecycle/" description="Understand module loading, initialization, and lookups." />
+    <LinkCard title="Networking" href="./api/network/" description="Send named events between server and client." />
+    <LinkCard title="Tagged components" href="./api/component-service/" description="Attach behavior to instances with CollectionService tags." />
+    {supportsState && <LinkCard title="State replication" href="./api/state-replication/" description="Synchronize global and player data with clients." />}
+    {version === '0.8.2' && <LinkCard title="Player coins example" href="./examples/player-coins/" description="Build a small feature with the stable API." />}
+    {isMaelstrom && <LinkCard title="Server service example" href="./examples/server-service/" description="Build a service with the Maelstrom API." />}
+    {isMaelstrom && <LinkCard title="Migrate from 0.8.2" href="./migration/from-0-8-2/" description="Review the changes before upgrading a game." />}
+    {version === '0.9.0-maelstrom.3' && <LinkCard title="Changes since Maelstrom-2" href="./migration/from-maelstrom-2/" description="See signal, state sync, networking, and lifecycle changes." />}
+    {isLegacy && <LinkCard title="Historical release guide" href="./readme/" description="Read the release guide adapted from this version's README." />}
+  </CardGrid>
+  <p><a href="../">Browse all documentation versions</a></p>
+</section>

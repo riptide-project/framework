@@ -2,9 +2,11 @@
 -- Riptide/shared/ModuleLoader.lua
 -- Unified module loading logic for both Client and Server initializers.
 
+type TaskLibrary = typeof(task)
 local task = task
 if not task then
-	task = require("@lune/task")
+	local loadTask: (string) -> TaskLibrary = require
+	task = loadTask("@lune/task")
 end
 
 local ModuleLoader = {}
@@ -175,6 +177,8 @@ function ModuleLoader.Launch(sideName: string, riptideRef: any, config: Config)
 		moduleRiptideRef.ComponentService:_start(config.ComponentsFolder)
 	end
 
+	local initializedModules = {}
+
 	-- 3. MODULE INIT PHASE — synchronous, sequential.
 	--    Plugin PublicAPIs are now available.
 	for _, data in ipairs(loadedModules) do
@@ -182,8 +186,10 @@ function ModuleLoader.Launch(sideName: string, riptideRef: any, config: Config)
 			local ok, err = xpcall(data.module.Init, debug.traceback, data.module, moduleRiptideRef)
 			if not ok then
 				warn(string.format("[%s] ❌ Error initializing %s:\n%s", sideName, data.name, tostring(err)))
+				continue
 			end
 		end
+		table.insert(initializedModules, data)
 	end
 
 	-- 4. PLUGIN START PHASE — readiness barrier before player lifecycle and module Start.
@@ -200,11 +206,11 @@ function ModuleLoader.Launch(sideName: string, riptideRef: any, config: Config)
 		and moduleRiptideRef.PlayerLifecycle
 		and type(moduleRiptideRef.PlayerLifecycle.Start) == "function"
 	then
-		moduleRiptideRef.PlayerLifecycle:Start(loadedModules, moduleRiptideRef)
+		moduleRiptideRef.PlayerLifecycle:Start(initializedModules, moduleRiptideRef)
 	end
 
 	-- 6. MODULE START PHASE — async via task.spawn (non-blocking).
-	for _, data in ipairs(loadedModules) do
+	for _, data in ipairs(initializedModules) do
 		if type(data.module.Start) == "function" then
 			task.spawn(function()
 				local ok, err = xpcall(data.module.Start, debug.traceback, data.module, moduleRiptideRef)

@@ -147,6 +147,144 @@ end
 -- ---------------------------------------------------------------------------
 
 return function()
+	test.suite("Plugin audit regressions", function()
+		test.case("sandbox releases manual and fired Once subscriptions", function()
+			local mgr = buildManager()
+			local scope
+			mgr:LoadPlugins(nil, {
+				makePlugin("Subscriptions", "Server", {
+					Start = function() end,
+					Init = function(_self, sandbox)
+						scope = sandbox
+					end,
+				}),
+			})
+			mgr:InitPlugins()
+			local off = scope:On("x", function() end)
+			off()
+			off()
+			check.equal(#scope._trove, 0)
+			local calls = 0
+			scope:Once("x", function()
+				calls += 1
+			end)
+			scope:Emit("x")
+			scope:Emit("x")
+			check.equal(calls, 1)
+			check.equal(#scope._trove, 0)
+			mgr:DestroyPlugins()
+		end)
+
+		test.case("rejected component registration never acquires ownership", function()
+			local cs = Env.RiptideShared.ComponentService
+			cs:_init({ CollectionService = Env.Mocks.MockCollectionService.new() })
+			local mgr = buildManager()
+			mgr._deps.ComponentService = cs
+			cs:_registerTagManually("Owned", {
+				new = function()
+					return {}
+				end,
+			})
+			local owner = cs._tagListeners.Owned
+			mgr:LoadPlugins(nil, {
+				makePlugin("Other", "Shared", {
+					Init = function(_self, sandbox)
+						sandbox:RegisterComponent("Owned", {
+							new = function()
+								return {}
+							end,
+						})
+					end,
+					Start = function() end,
+				}),
+			})
+			mgr:InitPlugins()
+			mgr:DestroyPlugins()
+			check.equal(cs._tagListeners.Owned, owner)
+			cs:_stop()
+		end)
+
+		test.case("detached tasks cannot register resources in a revoked sandbox", function()
+			local mgr, net = buildManager()
+			local sandboxRef
+			local plugin = makePlugin("Detached", "Shared", {
+				Init = function(_self, sandbox)
+					sandboxRef = sandbox
+				end,
+				Start = function(_self, sandbox)
+					task.delay(0.02, function()
+						sandbox:OnNetworkEvent("late", function() end)
+					end)
+					task.wait(0.1)
+				end,
+			})
+			plugin.Descriptor.StartTimeout = 0.005
+			mgr:LoadPlugins(nil, { plugin })
+			mgr:InitPlugins()
+			mgr:StartPlugins()
+			task.wait(0.04)
+			check.equal(#(net._handlers["__plugin:Detached:late"] or {}), 0)
+			check.equal(pcall(sandboxRef.CreateSignal, sandboxRef), false)
+		end)
+
+		test.case("reinitialization releases handlers registered by the old generation", function()
+			local mgr, net = buildManager()
+			mgr:LoadPlugins(nil, {
+				makePlugin("Old", "Shared", {
+					Init = function(_self, sandbox)
+						sandbox:OnNetworkEvent("x", function() end)
+					end,
+					Start = function() end,
+				}),
+			})
+			mgr:InitPlugins()
+			buildManager()
+			check.equal(#net._handlers["__plugin:Old:x"], 0)
+		end)
+
+		test.case("dependencies that fail Init prevent dependent Init and Start", function()
+			local mgr = buildManager()
+			local calls = 0
+			mgr:LoadPlugins(nil, {
+				makePlugin("Broken", "Shared", {
+					Init = function()
+						error("intentional")
+					end,
+					Start = function() end,
+				}),
+				makePlugin("Dependent", "Shared", {
+					Init = function()
+						calls += 1
+					end,
+					Start = function()
+						calls += 1
+					end,
+				}, { "Broken" }),
+			})
+			mgr:InitPlugins()
+			mgr:StartPlugins()
+			check.equal(calls, 0)
+			check.equal(mgr:GetStatus("Dependent"), "Errored")
+		end)
+
+		test.case("Start timeout cannot register resources after cleanup", function()
+			local mgr, net = buildManager()
+			local plugin = makePlugin("SlowAudit", "Shared", {
+				Init = function() end,
+				Start = function(_self, sandbox)
+					task.wait(0.03)
+					sandbox:OnNetworkEvent("late", function() end)
+				end,
+			})
+			plugin.Descriptor.StartTimeout = 0.005
+			mgr:LoadPlugins(nil, { plugin })
+			mgr:InitPlugins()
+			mgr:StartPlugins()
+			task.wait(0.05)
+			check.equal(mgr:GetStatus("SlowAudit"), "Errored")
+			check.equal(#(net._handlers["__plugin:SlowAudit:late"] or {}), 0)
+		end)
+	end)
 	test.suite("PluginIntegration: Healthy lifecycle", function()
 		test.case("Init is called before Start, status transitions to Running", function()
 			local mgr = buildManager()
@@ -789,7 +927,7 @@ return function()
 			check.equal(stopOrder[2], "StopA")
 		end)
 
-		test.case("StartPlugins times out slow Start and continues to later plugins", function()
+		test.case("Start timeout blocks dependents but permits independent plugins", function()
 			local mgr = buildManager()
 			local nextStarted = false
 
@@ -808,13 +946,21 @@ return function()
 				end,
 			}, { "SlowStarter" })
 
-			mgr:LoadPlugins(nil, { plugin, nextPlugin })
+			local independentStarted = false
+			local independent = makePlugin("Independent", "Server", {
+				Init = function() end,
+				Start = function()
+					independentStarted = true
+				end,
+			})
+			mgr:LoadPlugins(nil, { plugin, nextPlugin, independent })
 			mgr:InitPlugins()
 			mgr:StartPlugins()
 
-			check.equal(nextStarted, true)
+			check.equal(nextStarted, false)
+			check.equal(independentStarted, true)
 			check.equal(mgr:GetStatus("SlowStarter"), "Errored")
-			check.equal(mgr:GetStatus("AfterSlowStarter"), "Running")
+			check.equal(mgr:GetStatus("AfterSlowStarter"), "Errored")
 		end)
 
 		test.case("DestroyPlugins clears registry", function()

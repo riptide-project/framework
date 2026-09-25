@@ -1,176 +1,208 @@
 --!strict
--- Riptide/Utilities/Signal.lua
--- High-performance Signal implementation with zero-allocation hot paths.
---
--- DESIGN CONTRACT (v0.9.1):
---   :Fire() executes all connected callbacks SYNCHRONOUSLY in the calling
---   thread.  This eliminates per-connection task.spawn overhead in hot paths
---   (e.g. 60 Hz Heartbeat loops).  The framework no longer isolates
---   connections from each other via thread scheduling — the developer is
---   responsible for not yielding inside a :Connect callback.
---
---   :Wait() remains safe: it yields the CALLER's thread and resumes it via
---   task.spawn once the signal fires, which is the only allocation that
---   occurs in that code-path.
-
+type TaskLibrary = typeof(task)
 local task = task
 if not task then
-	task = require("@lune/task")
+	local loadTask: (string) -> TaskLibrary = require
+	task = loadTask("@lune/task")
 end
 
 export type Connection = {
 	Connected: boolean,
 	Disconnect: (self: Connection) -> (),
-	_signal: Signal?,
-	_fn: ((...any) -> ())?,
-	_next: Connection?,
-	_thread: thread?,
 }
 
-export type Signal<T... = ...any> = {
-	_head: Connection?,
-	Connect: (self: Signal<T...>, fn: (T...) -> ()) -> Connection,
-	Once: (self: Signal<T...>, fn: (T...) -> ()) -> Connection,
+export type Event<T... = ...any> = {
+	Connect: (self: Event<T...>, fn: (T...) -> ()) -> Connection,
+	Once: (self: Event<T...>, fn: (T...) -> ()) -> Connection,
+	Wait: (self: Event<T...>) -> T...,
+}
+
+export type Signal<T... = ...any> = Event<T...> & {
 	Fire: (self: Signal<T...>, T...) -> (),
-	Wait: (self: Signal<T...>) -> T...,
 	DisconnectAll: (self: Signal<T...>) -> (),
 	Destroy: (self: Signal<T...>) -> (),
 }
 
+type Node = {
+	older: Node?,
+	newer: Node?,
+	callback: ((...any) -> ())?,
+	handle: ConnectionInternal?,
+	waiter: thread?,
+	once: boolean,
+}
+
+type SignalInternal = {
+	_head: Node?,
+	_tail: Node?,
+	_destroyed: boolean,
+}
+
+type ConnectionInternal = Connection & { _node: Node?, _signal: SignalInternal? }
+
+local freeRunner: thread? = nil
+
+local function runHandler(callback: (...any) -> (), ...: any)
+	callback(...)
+	freeRunner = coroutine.running() :: thread
+end
+
+local function runner()
+	while true do
+		runHandler(coroutine.yield())
+	end
+end
+
+local function dispatch(callback: (...any) -> (), ...: any)
+	local available = freeRunner
+	local thread: thread
+	if available then
+		thread = available
+		freeRunner = nil
+	else
+		thread = coroutine.create(runner)
+		assert(coroutine.resume(thread))
+	end
+	task.spawn(thread, callback, ...)
+end
+
 local Connection = {}
 Connection.__index = Connection
 
-function Connection.new(signal: Signal<...any>, fn: (...any) -> ()): Connection
-	local self = setmetatable({
-		Connected = true,
-		_signal = signal,
-		_fn = fn,
-		_next = nil :: Connection?,
-		_thread = nil :: thread?,
-	}, Connection)
-	return (self :: any) :: Connection
-end
-
-function Connection:Disconnect()
+function Connection.Disconnect(self: ConnectionInternal)
 	if not self.Connected then
 		return
 	end
 	self.Connected = false
-
 	local signal = self._signal
-	if signal then
-		if signal._head == self then
-			signal._head = self._next
-		else
-			local curr = signal._head
-			while curr and curr._next ~= self do
-				curr = curr._next
-			end
-			if curr then
-				curr._next = self._next
-			end
-		end
+	local node = self._node
+	self._signal = nil
+	self._node = nil
+	if not (signal and node) then
+		return
 	end
 
-	-- Prevent memory leaks: clear all references on disconnect
-	self._signal = nil
-	self._fn = nil
-	self._next = nil
+	local newer = node.newer
+	local older = node.older
+	if newer then
+		newer.older = older
+	else
+		signal._head = older
+	end
+	if older then
+		older.newer = newer
+	else
+		signal._tail = newer
+	end
+	node.callback = nil
+	node.handle = nil
+	node.waiter = nil
 end
-
--- ---------------------------------------------------------------------------
 
 local Signal = {}
 Signal.__index = Signal
 
-function Signal.new<T...>(): Signal<T...>
-	local self = setmetatable({
-		_head = nil,
-	}, Signal)
-	return (self :: any) :: Signal
+function Signal.new(): Signal<...any>
+	return setmetatable({ _head = nil, _tail = nil, _destroyed = false }, Signal) :: any
 end
 
-function Signal:Connect(fn: (...any) -> ()): Connection
-	local connection = Connection.new(self, fn)
-	if self._head then
-		connection._next = self._head
+function Signal.Connect(self: SignalInternal, fn: (...any) -> ()): Connection
+	assert(not self._destroyed, "[Signal] Cannot connect to a destroyed signal.")
+	assert(type(fn) == "function", "[Signal] Connect requires a function.")
+	local handle: ConnectionInternal =
+		setmetatable({ Connected = true, _node = nil, _signal = self }, Connection) :: any
+	local head = self._head
+	local node: Node = { older = head, newer = nil, callback = fn, handle = handle, waiter = nil, once = false }
+	handle._node = node
+	if head then
+		head.newer = node
+	else
+		self._tail = node
 	end
-	self._head = connection
+	self._head = node
+	return handle
+end
+
+function Signal.Once(self: SignalInternal, fn: (...any) -> ()): Connection
+	assert(type(fn) == "function", "[Signal] Once requires a function.")
+	local connection = Signal.Connect(self, fn)
+	local node = (connection :: ConnectionInternal)._node
+	if node then
+		node.once = true
+	end
 	return connection
 end
 
-function Signal:Once(fn: (...any) -> ()): Connection
-	local connection: Connection
-	connection = self:Connect(function(...)
-		connection:Disconnect()
-		fn(...)
-	end)
-	return connection
-end
-
---[[
-	:Fire() — ZERO-ALLOCATION HOT PATH.
-
-	Iterates the linked list and calls each connected function directly in the
-	current thread.  No closures are created, no tasks are spawned.
-
-	⚠ Do NOT yield inside a :Connect callback.  If you need deferred/async
-	  execution, wrap the body of your callback in task.defer/task.spawn
-	  yourself, or use the Async module.
-]]
-function Signal:Fire(...: any)
-	local curr = self._head
-	while curr do
-		-- Read _next BEFORE calling _fn: the callback may Disconnect() `curr`,
-		-- which would nil out curr._next and cause the traversal to stop early.
-		local nextConn = curr._next
-		if curr.Connected and curr._fn then
-			curr._fn(...)
+function Signal.Fire(self: SignalInternal, ...: any)
+	local node = self._head
+	while node do
+		local nextNode = node.older
+		local callback = node.callback
+		if callback then
+			local waiter = node.waiter
+			if node.once or waiter then
+				local handle = node.handle
+				if handle then
+					handle:Disconnect()
+				end
+			end
+			if waiter then
+				task.spawn(waiter, true, ...)
+			else
+				dispatch(callback, ...)
+			end
 		end
-		curr = nextConn
+		node = nextNode
 	end
 end
 
---[[
-	:Wait() — yields the calling coroutine until the signal next fires.
-	The single task.spawn here is intentional: it resumes the suspended
-	thread from within the signal's synchronous Fire pass without blocking
-	the remaining connection callbacks.
-]]
-function Signal:Wait(): ...any
+local function waitResult(ok: boolean, ...: any): ...any
+	if not ok then
+		error("[Signal] Wait cancelled by DisconnectAll or Destroy.", 2)
+	end
+	return ...
+end
+
+function Signal.Wait(self: SignalInternal): ...any
 	local thread = coroutine.running()
-	local connection: Connection
-
-	connection = self:Connect(function(...: any)
-		connection:Disconnect()
-		task.spawn(thread, ...)
-	end)
-	connection._thread = thread
-
-	return coroutine.yield()
-end
-
-function Signal:DisconnectAll()
-	local curr = self._head
-	while curr do
-		local nextConn = curr._next
-		-- Resume any threads that are blocked in :Wait()
-		if curr._thread then
-			task.spawn(curr._thread)
-		end
-		curr.Connected = false
-		curr._signal = nil
-		curr._fn = nil
-		curr._next = nil
-		curr._thread = nil
-		curr = nextConn
+	local connection = Signal.Connect(self, function() end)
+	local node = (connection :: ConnectionInternal)._node
+	if node then
+		node.waiter = thread
 	end
-	(self :: any)._head = nil
+	return waitResult(coroutine.yield())
 end
 
-function Signal:Destroy()
-	self:DisconnectAll()
-	setmetatable(self :: any, nil)
+function Signal.DisconnectAll(self: SignalInternal)
+	local head = self._head
+	self._head = nil
+	self._tail = nil
+	local node = head
+	while node do
+		local handle = node.handle
+		if handle then
+			handle.Connected = false
+			handle._signal = nil
+			handle._node = nil
+		end
+		node.handle = nil
+		node.callback = nil
+		node = node.older
+	end
+	node = head
+	while node do
+		local waiter = node.waiter
+		node.waiter = nil
+		if waiter and coroutine.status(waiter) == "suspended" then
+			task.spawn(waiter, false)
+		end
+		node = node.older
+	end
+end
+
+function Signal.Destroy(self: SignalInternal)
+	self._destroyed = true
+	Signal.DisconnectAll(self)
 end
 
 return Signal

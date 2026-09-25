@@ -97,6 +97,12 @@ local function createNetworkMock(_isServer: boolean, snapshotResponse: any?)
 		end
 	end
 
+	network._registerInternal = network.Register
+	network._unregisterInternal = network.Unregister
+	network._fireInternalAllClients = network.FireAllClients
+	network._fireInternalClient = network.FireClient
+	network._fireInternalServer = network.FireServer
+
 	return network
 end
 
@@ -258,6 +264,125 @@ return function()
 	end)
 
 	test.suite("StateReplication (Client)", function()
+		test.case("late response id cannot finish a newer sync or resurrect deleted values", function()
+			local net = createNetworkMock(false)
+			StateReplication:_init({ IsServer = false, Network = net :: any })
+			local firstId = net._firedServer[1].args[1]
+			net.Trigger(StateReplication.Events.Snapshot, { requestId = firstId })
+			net.Trigger(StateReplication.Events.Delta, "global", "coins", 42, 1)
+			net.Trigger(StateReplication.Events.Delta, "global", "coins", nil, 2)
+			StateReplication:RequestSync()
+			local secondId = net._firedServer[2].args[1]
+			net.Trigger(
+				StateReplication.Events.Snapshot,
+				{ requestId = firstId, global = { coins = 99 }, globalVersions = { coins = 3 } }
+			)
+			check.equal((StateReplication :: any)._syncYielding, true)
+			check.equal(StateReplication:Get("coins"), nil)
+			net.Trigger(
+				StateReplication.Events.Snapshot,
+				{ requestId = secondId, global = { coins = 42 }, globalVersions = { coins = 1 } }
+			)
+			check.equal((StateReplication :: any)._syncYielding, false)
+			check.equal(StateReplication:Get("coins"), nil)
+		end)
+
+		test.case("cooldown response triggers one retry without buffering live deltas", function()
+			local net = createNetworkMock(false)
+			StateReplication:_init({ IsServer = false, Network = net :: any })
+			local firstId = net._firedServer[1].args[1]
+			net.Trigger(StateReplication.Events.Snapshot, { requestId = firstId, retryAfter = 0.01 })
+			for i = 1, 2000 do
+				net.Trigger(StateReplication.Events.Delta, "global", "coins", i, i)
+			end
+			check.equal(StateReplication:Get("coins"), 2000)
+			check.equal(#(StateReplication :: any)._syncBuffer, 0)
+			local deadline = os.clock() + 5
+			while #net._firedServer < 2 and os.clock() < deadline do
+				task.wait(0.02)
+			end
+			check.equal(#net._firedServer, 2)
+			net.Trigger(StateReplication.Events.Snapshot, { requestId = net._firedServer[2].args[1] })
+		end)
+
+		test.case("snapshot retries stop at three attempts", function()
+			local net = createNetworkMock(false)
+			StateReplication:_init({ IsServer = false, Network = net :: any, SyncTimeout = 0.01 })
+			local deadline = os.clock() + 6
+			while (StateReplication :: any)._syncYielding and os.clock() < deadline do
+				task.wait(0.02)
+			end
+			check.equal(#net._firedServer, 3)
+			check.equal((StateReplication :: any)._syncYielding, false)
+			net.Trigger(StateReplication.Events.Delta, "global", "coins", 42, 1)
+			check.equal(StateReplication:Get("coins"), 42)
+		end)
+
+		test.case("missing transport does not leave synchronization locked", function()
+			local net = createNetworkMock(false)
+			net._fireInternalServer = nil
+			StateReplication:_init({ IsServer = false, Network = net :: any })
+			check.equal(StateReplication:RequestSync(), false)
+			check.equal((StateReplication :: any)._syncYielding, false)
+		end)
+
+		test.case("sync timeout preserves live deltas and automatically retries", function()
+			local net = createNetworkMock(false)
+			StateReplication:_init({ IsServer = false, Network = net :: any, SyncTimeout = 0.01 })
+			net.Trigger(StateReplication.Events.Delta, "global", "coins", 42, 1)
+			local deadline = os.clock() + 5
+			while #net._firedServer < 2 and os.clock() < deadline do
+				task.wait(0.02)
+			end
+			check.equal(StateReplication:Get("coins"), 42)
+			check.equal(#net._firedServer, 2)
+			check.equal(#(StateReplication :: any)._syncBuffer, 0)
+			net.Trigger(StateReplication.Events.Snapshot, {})
+		end)
+
+		test.case("malformed snapshot does not discard buffered deltas", function()
+			local net = createNetworkMock(false)
+			StateReplication:_init({ IsServer = false, Network = net :: any })
+			net.Trigger(StateReplication.Events.Delta, "global", "coins", 42, 1)
+			net.Trigger(StateReplication.Events.Snapshot, false)
+			check.equal(StateReplication:Get("coins"), 42)
+		end)
+
+		test.case("older snapshot cannot roll back a delta already applied", function()
+			local net = createNetworkMock(false, { global = { coins = 1 }, globalVersions = { coins = 1 } })
+			StateReplication:_init({ IsServer = false, Network = net :: any })
+			net.Trigger(StateReplication.Events.Delta, "global", "coins", 42, 2)
+			StateReplication:RequestSync()
+			check.equal(StateReplication:Get("coins"), 42)
+		end)
+
+		test.case("self-unsubscribe does not skip other state subscribers", function()
+			local net = createNetworkMock(false, {})
+			StateReplication:_init({ IsServer = false, Network = net :: any })
+			local off
+			off = StateReplication:Subscribe("coins", function()
+				if off then
+					off()
+				end
+			end)
+			local count = 0
+			local offSecond = StateReplication:Subscribe("coins", function()
+				count += 1
+			end)
+			net.Trigger(StateReplication.Events.Delta, "global", "coins", 42, 1)
+			check.equal(count, 2)
+			offSecond()
+		end)
+
+		test.case("non-finite and fractional versions cannot poison later deltas", function()
+			local net = createNetworkMock(false, {})
+			StateReplication:_init({ IsServer = false, Network = net :: any })
+			net.Trigger(StateReplication.Events.Delta, "global", "coins", 100, math.huge)
+			net.Trigger(StateReplication.Events.Delta, "global", "coins", 100, 2.5)
+			net.Trigger(StateReplication.Events.Delta, "global", "coins", 42, 1)
+			check.equal(StateReplication:Get("coins"), 42)
+		end)
+
 		test.case("should request snapshot on init and merge global + player state", function()
 			local snapshot = {
 				global = { dayCycle = "day", coins = 10 },
@@ -486,6 +611,7 @@ return function()
 			local result = StateReplication:RequestSync()
 			check.equal(result, false)
 			check.equal(#network._firedServer, 1) -- still only 1
+			network.Trigger(StateReplication.Events.Snapshot, {})
 		end)
 	end)
 end

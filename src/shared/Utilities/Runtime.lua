@@ -1,7 +1,9 @@
 --!strict
+type TaskLibrary = typeof(task)
 local task = task
 if not task then
-	task = require("@lune/task") :: any
+	local loadTask: (string) -> TaskLibrary = require
+	task = loadTask("@lune/task") :: any
 end
 
 return {

@@ -2,56 +2,75 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, maelstrom]
   pull_request:
-    branches: [main]
+    branches: [main, maelstrom]
+  workflow_call:
+
+permissions:
+  contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  lint:
-    name: Lint & Format Check
+  framework:
+    name: Framework checks
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup mise
-        uses: jdx/mise-action@v3
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
         with:
           install: true
-
-      - name: Check formatting (StyLua)
+      - uses: pesde-pkg/setup@v1
+        with:
+          version: '0.7.4'
+      - name: Check release metadata
+        run: python3 scripts/check-release.py
+      - name: Test package publication checks
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s test/scripts -p 'test_*.py'
+      - name: Check formatting
         run: stylua --check src/ test/ .lune/
-
-      - name: Lint (Selene)
+      - name: Lint Luau
         run: selene src/ test/ .lune/
-
-  test:
-    name: Run Tests
-    runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup mise
-        uses: jdx/mise-action@v3
-        with:
-          install: true
-
-      - name: Setup Pesde
-        uses: pesde-pkg/setup@main
-
-      - name: Install dependencies
+      - name: Install test dependencies
         run: pesde install
-
-      - name: Run tests
+      - name: Run Lune tests
         run: lune run test/lune/RunLuneTests.luau
+      - name: Check Luau and Signal types
+        run: bash scripts/check-signal-types.sh
+      - name: Build Roblox model
+        run: rojo build default.project.json -o /tmp/Riptide.rbxm
+      - name: Validate Pesde package
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$(pesde publish --dry-run --yes 2>&1)"
+          printf '%s\n' "$output"
+          [[ "$output" == *"(dry run) package written to package.tar.gz"* ]]
+          test -s package.tar.gz
+          tar -tzf package.tar.gz > /dev/null
+      - name: Validate Wally package
+        run: |
+          wally package --output /tmp/Riptide-wally.zip
+          unzip -t /tmp/Riptide-wally.zip
+
+  docs:
+    name: Documentation build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+      - name: Install documentation dependencies
+        run: npm ci
+        working-directory: docs
+      - name: Build documentation
+        run: npm run build
+        working-directory: docs

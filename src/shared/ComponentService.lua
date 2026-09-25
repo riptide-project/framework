@@ -21,7 +21,7 @@ export type ComponentServiceAPI = {
 	Get: (self: ComponentServiceAPI, instance: Instance, tagName: string?) -> any?,
 	_init: (self: ComponentServiceAPI, deps: ComponentServiceDeps) -> (),
 	_start: (self: ComponentServiceAPI, componentsFolder: Folder) -> (),
-	_registerTagManually: (self: ComponentServiceAPI, tagName: string, componentClass: ComponentClass) -> (),
+	_registerTagManually: (self: ComponentServiceAPI, tagName: string, componentClass: ComponentClass) -> boolean,
 	_stop: (self: ComponentServiceAPI) -> (),
 	UnregisterTag: (self: ComponentServiceAPI, tagName: string) -> (),
 }
@@ -39,9 +39,7 @@ ComponentService._collectionService = nil
 local CleanupComponent: (self: ComponentServiceAPI, instance: Instance, tagName: string) -> ()
 
 function ComponentService:_init(deps: ComponentServiceDeps)
-	if self._isStarted then
-		self:_stop()
-	end
+	self:_stop()
 
 	local cleanupEntries = {}
 	for instance, components in pairs(self._registry) do
@@ -104,28 +102,29 @@ end
 -- Internal cleanup helper
 CleanupComponent = function(self: ComponentServiceAPI, instance: Instance, tagName: string)
 	local components = self._registry[instance]
+	local componentObj = if components then components[tagName] else nil
 	if components then
-		local componentObj = components[tagName]
-		if componentObj then
-			components[tagName] = nil
-			if type(componentObj.Destroy) == "function" then
-				pcall(componentObj.Destroy, componentObj)
-			end
-		end
+		components[tagName] = nil
 		if next(components) == nil then
 			self._registry[instance] = nil
 		end
 	end
-
+	-- Detach all ownership before user Destroy can re-register the same tag.
 	local conns = self._destroyingConns[instance]
 	if conns then
 		local conn = conns[tagName]
-		if conn then
-			conn:Disconnect()
-			conns[tagName] = nil
-		end
+		conns[tagName] = nil
 		if next(conns) == nil then
 			self._destroyingConns[instance] = nil
+		end
+		if conn then
+			conn:Disconnect()
+		end
+	end
+	if componentObj and type(componentObj.Destroy) == "function" then
+		local ok, err = pcall(componentObj.Destroy, componentObj)
+		if not ok then
+			warn(string.format("[ComponentService] Destroy failed for '%s': %s", tagName, tostring(err)))
 		end
 	end
 end
@@ -138,25 +137,40 @@ local function SetupComponent(
 	ComponentClass: ComponentClass
 )
 	local componentsForInstance = self._registry[instance]
-	if componentsForInstance and componentsForInstance[tagName] ~= nil then
+	local conns = self._destroyingConns[instance]
+	if (componentsForInstance and componentsForInstance[tagName] ~= nil) or (conns and conns[tagName]) then
 		return
 	end
 
+	-- This connection also acts as a construction token while new() yields.
+	if not conns then
+		conns = {}
+		self._destroyingConns[instance] = conns
+	end
+	local connection = instance.Destroying:Connect(function()
+		CleanupComponent(self, instance, tagName)
+	end)
+	assert(conns, "[ComponentService] Missing construction connections.")
+	conns[tagName] = connection
 	local success, result = pcall(ComponentClass.new, instance)
+	local currentConns = self._destroyingConns[instance]
+	local stillOwned = currentConns and currentConns[tagName] == connection
 
-	if success and result then
+	if success and type(result) == "table" then
+		if not stillOwned then
+			if type(result.Destroy) == "function" then
+				pcall(result.Destroy, result)
+			end
+			return
+		end
 		if not self._registry[instance] then
 			self._registry[instance] = {}
 		end
 		self._registry[instance][tagName] = result
-
-		if not self._destroyingConns[instance] then
-			self._destroyingConns[instance] = {}
-		end
-		self._destroyingConns[instance][tagName] = instance.Destroying:Connect(function()
-			CleanupComponent(self, instance, tagName)
-		end)
 	else
+		if stillOwned then
+			CleanupComponent(self, instance, tagName)
+		end
 		warn(string.format("[ComponentService] Failed to initialize instance of '%s':\n%s", tagName, tostring(result)))
 	end
 end
@@ -186,16 +200,24 @@ local function RegisterTag(self: ComponentServiceAPI, tagName: string, Component
 		CleanupComponent(self, instance, tagName)
 	end)
 
-	self._tagListeners[tagName] = {
+	local registration = {
 		added = addedConn,
 		removed = removedConn,
 	}
+	self._tagListeners[tagName] = registration
 
 	for _, instance in ipairs(cs:GetTagged(tagName)) do
-		SetupComponent(self, instance, tagName, ComponentClass)
+		-- A constructor can yield while this registration is removed or replaced.
+		if self._tagListeners[tagName] ~= registration then
+			return false
+		end
+		if cs:HasTag(instance, tagName) then
+			SetupComponent(self, instance, tagName, ComponentClass)
+		end
 	end
 
-	return true
+	-- The last constructor can also invalidate ownership before returning.
+	return self._tagListeners[tagName] == registration
 end
 
 function ComponentService:_start(componentsFolder: Folder)
@@ -240,7 +262,7 @@ end
 --- Registers a single tag and its ComponentClass directly, without a folder scan.
 --- Used by PluginSandbox:RegisterComponent() so plugins don't need ComponentsFolder.
 function ComponentService:_registerTagManually(tagName: string, ComponentClass: ComponentClass)
-	RegisterTag(self, tagName, ComponentClass)
+	return RegisterTag(self, tagName, ComponentClass)
 end
 
 function ComponentService:UnregisterTag(tagName: string)
@@ -252,8 +274,8 @@ function ComponentService:UnregisterTag(tagName: string)
 	end
 
 	local instancesToCleanup = {}
-	for instance, components in pairs(self._registry) do
-		if components[tagName] then
+	for instance, conns in pairs(self._destroyingConns) do
+		if conns[tagName] then
 			table.insert(instancesToCleanup, instance)
 		end
 	end

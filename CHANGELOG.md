@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [0.9.0-maelstrom.3] - 2026-09-25
+
+### Added
+- Read-only typed `Event<T...>` subscriptions alongside typed `Signal<T...>`. Trove's `Connect` and `Once` helpers retain callback payload types.
+- An internal `__riptide_` route for state replication on the existing reliable remote. Game handlers and middleware cannot intercept framework state messages.
+- Snapshot request IDs, bounded retries, a sync deadline and per-player cooldown replies for state resynchronization.
+- Regression coverage for signal mutation, state sync races, malformed and forged packets, player joins and leaves, plugin failure chains and component ownership.
+- Positive and negative Signal type fixtures checked with a pinned Luau-LSP version.
+
+### Changed
+- Signal listeners run independently through reusable threads. `Fire` keeps newest-first dispatch, does not wait for yielding callbacks and continues past failing listeners. Connection removal remains constant-time.
+- `Signal:Wait()` preserves trailing `nil` arguments and raises an error when `DisconnectAll()` or `Destroy()` cancels the wait.
+- Player hooks initialize each player independently. A yielding hook for one player no longer delays other players or module `Start`; unfinished work is cancelled when the player leaves or lifecycle state resets.
+- Live state deltas keep applying during a snapshot request. Per-key versions stop an older snapshot from replacing newer values or reviving deletions.
+- `Async.Run` returns its fallback on timeout without cancelling arbitrary user work. Plugin `Start` still cancels the task owned by its startup timeout.
+- Network handler and middleware lists use stable snapshots while dispatching, so registrations and removals during callbacks do not corrupt the current pass.
+
+### Fixed
+- Snapshot requests no longer wait forever after a cooldown rejection or lost reply. Stale responses are ignored; cooldown replies are bounded per player, and retry state is cleaned up on leave or reset.
+- Public Network methods reject reserved `__riptide_` names. Internal state messages use the reliable remote and bypass public middleware; side-specific handlers and payload checks reject malformed state packets without changing server-owned state.
+- Signal traversal survives disconnecting the next listener, nested `Fire`, `Once`, and destruction during dispatch. Disconnected handles release their references.
+- Network middleware, EventBus and Async preserve trailing `nil` payload values. Nested EventBus `Once` subscriptions cannot run twice.
+- Player joins and leaves during existing-player replay are observed once, including when a hook yields.
+- Component removal during a yielding constructor cannot resurrect a removed instance. Registration and cleanup track tag ownership, so a plugin cannot remove another plugin's component.
+- Cancelling or replacing a tag registration while a constructor yields stops the remaining instance replay. Removed tags are rechecked before construction, and a stale registration cannot claim ownership of its replacement.
+- Plugin failures propagate to required dependents while independent plugins keep running. A timed-out `Start` or closed sandbox cannot register late handlers, subscriptions or components.
+- Failed module `Init` skips that module's `Start` and player hooks. StateMachine destruction and Trove `Once` cleanup handle the tested re-entrant and error cases.
+
+### Breaking changes
+- Signal callbacks no longer finish synchronously inside `Fire`. Code that needs a result must use an explicit completion mechanism; callback completion order is not guaranteed.
+- Cancelling `Signal:Wait()` through `DisconnectAll()` or `Destroy()` now raises an error instead of silently resuming.
+- `__riptide_` is reserved for framework messages. Rename game or plugin events that used this prefix.
+- Failed plugin dependencies now block dependent plugins, and `Async.Run` timeouts no longer cancel the user's function.
+
+### Documentation and validation
+- Added versioned Maelstrom-3 API, installation and migration guides while keeping `0.8.2` as the default stable learning path. Historical installation guides use shorter Pesde/Wally commands; user documentation no longer instructs consumers to run framework tests.
+- CI checks format, lint, runtime tests, source and Signal types, Rojo output, both package archives and the documentation build. The Lune runner now returns a failing exit status when a suite fails.
+- Release tags must match Pesde and Wally versions and a dated changelog entry before publication. CI gates automatic Pesde and Wally publication, and both registry acknowledgements gate the GitHub release. Canary tags are marked as prereleases. Docs deploy from `maelstrom`; Wally packaging excludes development fixtures and scripts.
+- Local validation: 191/191 Lune tests including tag-registration cancellation regressions, six publication-helper tests, zero Selene warnings, and clean Luau type and Signal fixture checks. Rojo build, Pesde dry run, Wally archive and 111 documentation pages also passed during release review.
+- Earlier manual Studio server/client and two-client checks passed. Long-duration network load and whole-application heap profiling have not been completed.
+
 ## [0.9.0-maelstrom.2] - 2026-07-04
 
 ### Added

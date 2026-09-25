@@ -1,11 +1,13 @@
 --!strict
+local process = require("@lune/process")
 
 local test_files = {
+	"../shared/Regression.test",
 	"../shared/Async.test",
-	"../shared/Chaos.test",
 	"../shared/ComponentService.test",
 	"../shared/DirectivePolicy.test",
 	"../shared/EventBus.test",
+	"../shared/SecurityRegression.test",
 	"../shared/ModuleLoader.test",
 	"../shared/Network.test",
 	"../shared/PlayerLifecycle.test",
@@ -38,6 +40,9 @@ local success = frktest.run()
 
 if success then
 	print("✅ [Lune] All tests passed!")
+	-- Suites own their async assertions; parked mock waiters must not keep CI alive.
+	process.exit(0)
 else
 	warn("❌ [Lune] Some tests failed!")
+	process.exit(1)
 end

@@ -1,0 +1,35 @@
+---
+import config from 'virtual:starlight/user-config';
+import Search from 'virtual:starlight/components/Search';
+import SiteTitle from 'virtual:starlight/components/SiteTitle';
+import SocialIcons from 'virtual:starlight/components/SocialIcons';
+import ThemeSelect from 'virtual:starlight/components/ThemeSelect';
+import VersionSelect from './VersionSelect.astro';
+
+const shouldRenderSearch = config.pagefind || config.components.Search !== '@astrojs/starlight/components/Search.astro';
+---
+
+<div class="header">
+	<div class="title-wrapper"><SiteTitle /></div>
+	<div class="search-wrapper">{shouldRenderSearch && <Search />}</div>
+	<div class="version-wrapper"><VersionSelect /></div>
+	<div class="right-group"><SocialIcons /><ThemeSelect /></div>
+</div>
+
+<style>
+	.header { display: flex; align-items: center; gap: 1rem; height: 100%; }
+	.title-wrapper { min-width: 0; flex: 0 0 auto; --sl-nav-gap: 0.7rem; }
+	.search-wrapper { flex: 1 1 auto; min-width: 0; }
+	.version-wrapper { flex: 0 0 auto; }
+	.right-group { display: flex; align-items: center; gap: 0.8rem; }
+	@media (max-width: 65rem) { .right-group { display: none; } }
+	@media (max-width: 50rem) {
+		.header { gap: 0.5rem; }
+		.search-wrapper { order: 3; flex: 0 0 auto; }
+		.version-wrapper { margin-inline-start: auto; }
+	}
+	@media (max-width: 25rem) {
+		.title-wrapper :global(.site-title span) { display: none; }
+		.title-wrapper :global(.site-title img) { height: 2rem; }
+	}
+</style>

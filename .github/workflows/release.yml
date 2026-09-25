@@ -3,82 +3,92 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - 'v*'
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  release:
-    name: Build & Release
+  metadata:
+    name: Validate release tag
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - run: python3 scripts/check-release.py --tag "$GITHUB_REF_NAME"
+      - name: Check registry credentials
+        env:
+          PESDE_TOKEN: ${{ secrets.PESDE_TOKEN }}
+          WALLY_TOKEN: ${{ secrets.WALLY_TOKEN }}
+        run: |
+          test -n "$PESDE_TOKEN" || { echo '::error::Set the PESDE_TOKEN repository secret'; exit 1; }
+          test -n "$WALLY_TOKEN" || { echo '::error::Set the WALLY_TOKEN repository secret'; exit 1; }
 
-      - name: Setup mise
-        uses: jdx/mise-action@v3
+  verify:
+    name: Reuse CI checks
+    needs: metadata
+    uses: ./.github/workflows/ci.yml
+
+  packages:
+    name: Publish ${{ matrix.registry }} package
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - registry: pesde
+            secret: PESDE_TOKEN
+          - registry: wally
+            secret: WALLY_TOKEN
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
         with:
           install: true
+      - uses: pesde-pkg/setup@v1
+        with:
+          version: '0.7.4'
+          cache: false
+      - name: Publish package and verify acknowledgement
+        env:
+          REGISTRY_TOKEN: ${{ secrets[matrix.secret] }}
+        run: python3 scripts/publish-package.py "${{ matrix.registry }}"
 
-      - name: Setup Pesde
-        uses: pesde-pkg/setup@main
-
-      - name: Check formatting (StyLua)
-        run: stylua --check src/ test/ .lune/
-
-      - name: Lint (Selene)
-        run: selene src/ test/ .lune/
-
-      - name: Version preflight (warning only)
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          PESDE_VERSION="$(grep -E '^version\s*=\s*"' pesde.toml | head -n1 | sed -E 's/^version\s*=\s*"([^"]+)".*/\1/')"
-
-          if [[ -z "${PESDE_VERSION}" ]]; then
-            echo "::warning::Could not read version from pesde.toml"
-          elif [[ "${PESDE_VERSION}" != "${TAG_VERSION}" ]]; then
-            echo "::warning::Version mismatch: tag=${TAG_VERSION}, pesde.toml=${PESDE_VERSION}"
-          fi
-
-          if ! grep -Eq "^## \[${TAG_VERSION}\]" CHANGELOG.md; then
-            echo "::warning::CHANGELOG.md does not contain section [${TAG_VERSION}]"
-          fi
-
-      - name: Install dependencies
-        run: pesde install
-
-      - name: Run tests
-        run: lune run test/lune/RunLuneTests.luau
-
-      - name: Build .rbxm
+  release:
+    name: Publish GitHub release
+    needs: packages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+        with:
+          install: true
+      - name: Build release model
         run: rojo build default.project.json -o Riptide.rbxm
-
-      - name: Extract clean version
+      - name: Get package version
         id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-
-      - name: Create GitHub Release
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           name: Riptide ${{ github.ref_name }}
-          body: |
-            ## 🌊 Riptide ${{ github.ref_name }}
-
-            ### Installation
-
-            **Via Pesde (recommended):**
-            ```toml
-            [dependencies]
-            Riptide = { name = "riptide/core", version = "${{ steps.version.outputs.VERSION }}" }
-            ```
-
-            **Manual:** Download `Riptide.rbxm` below and insert into `ReplicatedStorage`.
           files: Riptide.rbxm
+          fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           generate_release_notes: true
+          body: |
+            This version has been published to Pesde and Wally.
+
+            Pesde: `pesde add riptide/core@${{ steps.version.outputs.value }} --alias Riptide`.
+            Wally: add `Riptide = "riptide/core@${{ steps.version.outputs.value }}"` to `[dependencies]` and run `wally install`.
+
+            Manual installation: download `Riptide.rbxm` below and insert it under `ReplicatedStorage.Packages`.

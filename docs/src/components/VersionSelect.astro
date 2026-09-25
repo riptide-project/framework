@@ -1,0 +1,52 @@
+---
+import { getCollection } from 'astro:content';
+import { latestPreview, latestStable, releases, versionPath } from '../versions';
+
+const match = Astro.url.pathname.match(/\/versions\/([^/]+)\/(.*)/);
+const current = match?.[1] ?? '';
+const page = match?.[2].replace(/\/$/, '') ?? '';
+const availablePages = new Set((await getCollection('docs')).map((entry) => entry.id));
+const destination = (version: string) => {
+	const samePage = page && `versions/${version}/${page}`;
+	return samePage && availablePages.has(samePage) ? `${versionPath(version)}${page}/` : versionPath(version);
+};
+const stable = releases.filter((release) => release.channel === 'Stable');
+const earlierPreviews = releases.filter((release) => release.channel === 'Preview' && release.version !== latestPreview.version);
+---
+
+<label class="version-picker">
+	<span class="sr-only">Documentation version</span>
+	<select aria-label="Documentation version" onchange="window.location.assign(this.value)">
+		<option value="/framework/" selected={!current}>Project home</option>
+		<optgroup label="Current">
+			<option value={destination(latestStable.version)} selected={current === latestStable.version}>v{latestStable.version} · Stable</option>
+			<option value={destination(latestPreview.version)} selected={current === latestPreview.version}>v{latestPreview.version} · {latestPreview.label}</option>
+		</optgroup>
+		<optgroup label="Earlier stable releases">
+			{stable.slice(1).map((release) => (
+				<option value={destination(release.version)} selected={current === release.version}>v{release.version}</option>
+			))}
+		</optgroup>
+		<optgroup label="Earlier previews">
+			{earlierPreviews.map((release) => (
+				<option value={destination(release.version)} selected={current === release.version}>v{release.version}</option>
+			))}
+		</optgroup>
+	</select>
+</label>
+
+<style>
+	.version-picker select {
+		max-width: 13.5rem;
+		padding: 0.45rem 1.7rem 0.45rem 0.7rem;
+		border: 1px solid var(--sl-color-hairline);
+		border-radius: 0.5rem;
+		background: var(--sl-color-bg-nav);
+		color: var(--sl-color-text);
+		font: inherit;
+		font-size: 0.82rem;
+		cursor: pointer;
+	}
+	.version-picker select:focus-visible { outline: 2px solid var(--sl-color-accent); outline-offset: 2px; }
+	@media (max-width: 40rem) { .version-picker select { max-width: 7rem; } }
+</style>

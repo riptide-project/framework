@@ -1,5 +1,5 @@
 name = "riptide/core"
-version = "0.9.0-maelstrom.2"
+version = "0.9.0-maelstrom.3"
 description = "A strict Luau framework for Roblox with side-specific APIs, typed networking/state, module lifecycle orchestration, and sandboxed plugins."
 license = "MIT"
 authors = ["Riptide Development Group (https://github.com/riptide-project)"]

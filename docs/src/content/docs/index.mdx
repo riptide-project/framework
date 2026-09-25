@@ -1,46 +1,29 @@
 ---
 title: Riptide Framework
-description: A lightweight, strictly-typed, and modular framework for Roblox.
+description: Build Roblox games with a clear module lifecycle, typed APIs, networking, and state replication.
 template: splash
 hero:
-  tagline: Lightweight. Strictly typed. Built for production Roblox games.
+  tagline: A typed Roblox framework that helps your first service feel simple and your largest game stay organized.
   image:
-    file: ../../assets/logo.png
-  actions: [{ text: "Getting Started", link: "./guides/getting-started/", icon: "right-arrow", variant: "primary" }, { text: "Examples", link: "./examples/server-service/", icon: "document", variant: "minimal" }, { text: "Migration", link: "./migration/from-0-8-2/", icon: "external", variant: "minimal" }]
+    file: ../../assets/logo.svg
+  actions: [{ text: "Start with 0.8.2 stable", link: "./versions/0.8.2/guides/quickstart/", icon: "right-arrow", variant: "primary" }, { text: "Explore Maelstrom-3 preview", link: "./versions/0.9.0-maelstrom.3/", icon: "document", variant: "minimal" }]
 ---
 
-import { Card, CardGrid } from '@astrojs/starlight/components';
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-## Why Riptide?
+## Build your first feature, then grow with confidence
+
+Riptide gives your server and client modules a predictable **Load → Init → Start** lifecycle. It also provides named networking, replicated state, and reusable components. You can learn one piece at a time.
 
 <CardGrid stagger>
-	<Card title="Phased Initialization" icon="rocket">
-		Deterministic **Load → Init → Start** lifecycle eliminates race conditions. Lifecycle hooks receive side-specific Riptide APIs so autocomplete stays honest without extra prefixes.
-	</Card>
-	<Card title="Unified Networking" icon="document">
-		Single `RemoteEvent` + `UnreliableRemoteEvent` pair with named dispatch, middleware pipelines, and zero `ReplicatedStorage` clutter.
-	</Card>
-	<Card title="Strictly Typed" icon="setting">
-		`--!strict` Luau throughout. Fully typed API surface with exported types for autocomplete and compile-time safety.
-	</Card>
-	<Card title="State Replication" icon="open-book">
-		Server-authoritative global and per-player state with automatic snapshot sync, delta updates, and reactive `Subscribe` on clients.
-	</Card>
+	<LinkCard title="New to Riptide?" href="./versions/0.8.2/guides/quickstart/" description="Install the latest stable release and launch your first service." />
+	<LinkCard title="Ready to build?" href="./versions/0.8.2/guides/module-lifecycle/" description="Learn how modules start, talk to each other, and avoid initialization races." />
+	<LinkCard title="Need the stable API?" href="./versions/0.8.2/api/network/" description="Read the 0.8.2 reference for Network, State, components, and utilities." />
+	<LinkCard title="Trying Maelstrom-3?" href="./versions/0.9.0-maelstrom.3/" description="Read the latest preview docs and migration guide from Maelstrom-2." />
 </CardGrid>
 
-## Quick Links
+## Choose the documentation that matches your package
 
-<CardGrid>
-	<Card title="Examples" icon="document" href="./examples/server-service/">
-		Copy practical server, typed Network/State, and plugin examples using the current Maelstrom-2 API.
-	</Card>
-	<Card title="Migration" icon="external" href="./migration/from-0-8-2/">
-		Move from `0.8.2` stable or `0.9.0-maelstrom.1` with focused breaking-change checklists.
-	</Card>
-	<Card title="Plugin System" icon="setting" href="./guides/plugins/">
-		Build sandboxed framework extensions that become ready before player replay and game module `Start`.
-	</Card>
-	<Card title="API Reference" icon="open-book" href="./api/network/">
-		Reference pages for Network, State, components, lifecycle, module loading, and utilities.
-	</Card>
-</CardGrid>
+The default learning path uses **0.8.2**, the latest stable release. **Maelstrom-3** is the latest preview. Use the [version archive](./versions/) to match the docs to your installed package.
+
+Pick your package version in the selector at the top of every page. Examples and API names can differ between releases.

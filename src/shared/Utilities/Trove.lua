@@ -3,9 +3,11 @@
 -- Robust utility for tracking objects that need cleanup.
 -- Derived from Sleitnick's Trove.
 
+type TaskLibrary = typeof(task)
 local task = task
 if not task then
-	task = require("@lune/task")
+	local loadTask: (string) -> TaskLibrary = require
+	task = loadTask("@lune/task")
 end
 
 local RunService = nil
@@ -17,15 +19,15 @@ export type Trove = {
 	Extend: (self: Trove) -> Trove,
 	Clone: <T>(self: Trove, instance: T & Instance) -> T,
 	Construct: <T, A...>(self: Trove, class: Constructable<T, A...>, A...) -> T,
-	Connect: (
+	Connect: <T...>(
 		self: Trove,
-		signal: SignalLike | SignalLikeMetatable | RBXScriptSignal,
-		fn: (...any) -> ...any
+		signal: TypedSignal<T...> | RBXScriptSignal,
+		fn: (T...) -> ()
 	) -> ConnectionLike | ConnectionLikeMetatable,
-	Once: (
+	Once: <T...>(
 		self: Trove,
-		signal: SignalLike | SignalLikeMetatable | RBXScriptSignal,
-		fn: (...any) -> ...any
+		signal: TypedSignal<T...> | RBXScriptSignal,
+		fn: (T...) -> ()
 	) -> ConnectionLike | ConnectionLikeMetatable,
 	BindToRenderStep: (self: Trove, name: string, priority: number, fn: (dt: number) -> ()) -> (),
 	AddPromise: <T>(self: Trove, promise: (T & PromiseLike) | (T & PromiseLikeMetatable)) -> T,
@@ -78,6 +80,11 @@ type ConnectionLikeMetatable = typeof(setmetatable(
 type SignalLike = {
 	Connect: (self: SignalLike, callback: (...any) -> ...any) -> ConnectionLike | ConnectionLikeMetatable,
 	Once: (self: SignalLike, callback: (...any) -> ...any) -> ConnectionLike | ConnectionLikeMetatable,
+}
+
+type TypedSignal<T...> = {
+	Connect: (self: TypedSignal<T...>, callback: (T...) -> ()) -> ConnectionLike | ConnectionLikeMetatable,
+	Once: (self: TypedSignal<T...>, callback: (T...) -> ()) -> ConnectionLike | ConnectionLikeMetatable,
 }
 
 type SignalLikeMetatable = typeof(setmetatable(
@@ -263,8 +270,8 @@ function Trove.Once(
 
 	local conn
 	conn = confirmedSignal:Once(function(...)
-		fn(...)
 		self:Pop(conn)
+		fn(...)
 	end)
 
 	return self:Add(conn)
@@ -338,7 +345,8 @@ function Trove.Clean(self: TroveInternal)
 	self._cleaning = true
 
 	for _, obj in self._objects do
-		local ok, err = xpcall(self._cleanupObject, debug.traceback, self, obj[1], obj[2])
+		local protectedResult = table.pack(xpcall(self._cleanupObject, debug.traceback, self, obj[1], obj[2]))
+		local ok, err = protectedResult[1], protectedResult[2]
 		if not ok then
 			warn(string.format("[Trove] Error while cleaning object: %s", tostring(err)))
 		end
